@@ -1,0 +1,14 @@
+{
+  "appId": "jp.retainingwallkarte.app",
+  "appName": "Retaining Wall Karte",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https",
+    "iosScheme": "capacitor"
+  },
+  "plugins": {
+    "Camera": {
+      "presentationStyle": "fullScreen"
+    }
+  }
+}

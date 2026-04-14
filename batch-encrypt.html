@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Excel一括パスコード設定</title>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx-populate@1.21.0/browser/xlsx-populate.min.js"
+          integrity="sha384-YnsK3VaaV54M5EcU58Pt9SdJqzL0iZpQzQAcav+18Kgn5tbwk16y/3g6FpT2d83h"
+          crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"
+          integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG"
+          crossorigin="anonymous"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans JP', sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 16px;
+    }
+    h1 {
+      font-size: 20px;
+      margin-bottom: 8px;
+      color: #00a84f;
+    }
+    .subtitle {
+      font-size: 13px;
+      color: #94a3b8;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: #2a2a4a;
+      border-radius: 16px;
+      padding: 24px;
+      width: 100%;
+      max-width: 600px;
+      margin-bottom: 16px;
+    }
+    .card h2 {
+      font-size: 15px;
+      color: #667eea;
+      margin-bottom: 16px;
+    }
+
+    /* モード選択 */
+    .mode-toggle {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .mode-btn {
+      flex: 1;
+      padding: 10px;
+      border: 2px solid #3a3a5a;
+      border-radius: 10px;
+      background: transparent;
+      color: #94a3b8;
+      font-size: 14px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .mode-btn.active {
+      border-color: #00a84f;
+      color: #00a84f;
+      background: rgba(0, 168, 79, 0.1);
+    }
+
+    /* ドロップゾーン */
+    .drop-zone {
+      border: 2px dashed #3a3a5a;
+      border-radius: 12px;
+      padding: 32px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-bottom: 16px;
+    }
+    .drop-zone.dragover {
+      border-color: #00a84f;
+      background: rgba(0, 168, 79, 0.05);
+    }
+    .drop-zone-icon { font-size: 36px; margin-bottom: 8px; }
+    .drop-zone-text { font-size: 14px; color: #94a3b8; }
+    .drop-zone-hint { font-size: 12px; color: #64748b; margin-top: 4px; }
+
+    /* パスコード入力 */
+    .passcode-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .passcode-row label {
+      font-size: 14px;
+      white-space: nowrap;
+    }
+    .passcode-input {
+      flex: 1;
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 2px solid #3a3a5a;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-size: 18px;
+      letter-spacing: 4px;
+      text-align: center;
+      outline: none;
+    }
+    .passcode-input:focus {
+      border-color: #667eea;
+    }
+    .toggle-vis {
+      background: none;
+      border: none;
+      font-size: 20px;
+      cursor: pointer;
+      padding: 4px;
+    }
+
+    /* ファイルリスト */
+    .file-list {
+      list-style: none;
+      max-height: 240px;
+      overflow-y: auto;
+      margin-bottom: 16px;
+    }
+    .file-list:empty { display: none; }
+    .file-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      margin-bottom: 4px;
+      font-size: 13px;
+      background: rgba(255,255,255,0.03);
+    }
+    .file-item .status { font-size: 16px; }
+    .file-item .name { flex: 1; word-break: break-all; }
+    .file-item .size { color: #64748b; font-size: 12px; white-space: nowrap; }
+    .file-item .remove {
+      background: none;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      font-size: 16px;
+      padding: 0 4px;
+    }
+    .file-item.done { opacity: 0.6; }
+    .file-item.error .name { color: #f87171; }
+
+    /* ボタン */
+    .btn-primary {
+      width: 100%;
+      padding: 14px;
+      border-radius: 12px;
+      border: none;
+      background: #00a84f;
+      color: #fff;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    .btn-primary:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .btn-primary:not(:disabled):active {
+      opacity: 0.8;
+    }
+
+    /* プログレス */
+    .progress-bar {
+      height: 4px;
+      background: #3a3a5a;
+      border-radius: 2px;
+      margin-bottom: 8px;
+      overflow: hidden;
+      display: none;
+    }
+    .progress-bar.active { display: block; }
+    .progress-fill {
+      height: 100%;
+      background: #00a84f;
+      border-radius: 2px;
+      transition: width 0.3s;
+      width: 0%;
+    }
+    .progress-text {
+      font-size: 12px;
+      color: #94a3b8;
+      text-align: center;
+      margin-bottom: 12px;
+      min-height: 16px;
+    }
+
+    /* 結果 */
+    .result {
+      text-align: center;
+      padding: 16px;
+      border-radius: 12px;
+      margin-top: 12px;
+      display: none;
+    }
+    .result.success {
+      display: block;
+      background: rgba(0, 168, 79, 0.1);
+      color: #00a84f;
+    }
+    .result.error {
+      display: block;
+      background: rgba(248, 113, 113, 0.1);
+      color: #f87171;
+    }
+
+    .footer {
+      margin-top: 24px;
+      font-size: 12px;
+      color: #475569;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Excel一括パスコード設定</h1>
+<p class="subtitle">複数のExcelファイルにパスコード（パスワード保護）を一括設定</p>
+
+<div class="card">
+  <h2>1. モード選択</h2>
+  <div class="mode-toggle">
+    <button class="mode-btn active" onclick="setMode('encrypt')" id="mode-encrypt">🔒 暗号化</button>
+    <button class="mode-btn" onclick="setMode('decrypt')" id="mode-decrypt">🔓 復号（解除）</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>2. パスコード入力</h2>
+  <div class="passcode-row">
+    <label>パスコード:</label>
+    <input type="password" class="passcode-input" id="passcode" placeholder="例: 1234" autocomplete="off">
+    <button class="toggle-vis" onclick="toggleVis()" id="toggle-vis">👁</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>3. ファイル選択</h2>
+  <div class="drop-zone" id="drop-zone">
+    <div class="drop-zone-icon">📂</div>
+    <div class="drop-zone-text">ここにExcelファイルをドラッグ＆ドロップ</div>
+    <div class="drop-zone-hint">またはタップしてファイルを選択（.xlsx）</div>
+  </div>
+  <input type="file" id="file-input" accept=".xlsx" multiple style="display:none">
+  <ul class="file-list" id="file-list"></ul>
+</div>
+
+<div class="card">
+  <div class="progress-bar" id="progress-bar">
+    <div class="progress-fill" id="progress-fill"></div>
+  </div>
+  <div class="progress-text" id="progress-text"></div>
+  <button class="btn-primary" id="run-btn" onclick="run()" disabled>🔒 一括暗号化を実行</button>
+  <div class="result" id="result"></div>
+</div>
+
+<p class="footer">Retaining Wall Karte ツール — Excel標準のAES-256暗号化を使用</p>
+
+<script>
+  let mode = 'encrypt';
+  let files = []; // { file, handle?, status }
+  const supportsFS = ('showOpenFilePicker' in window);
+
+  function setMode(m) {
+    mode = m;
+    document.getElementById('mode-encrypt').classList.toggle('active', m === 'encrypt');
+    document.getElementById('mode-decrypt').classList.toggle('active', m === 'decrypt');
+    document.getElementById('run-btn').textContent =
+      m === 'encrypt' ? '🔒 一括暗号化を実行' : '🔓 一括復号を実行';
+    updateRunBtn();
+  }
+
+  function toggleVis() {
+    const inp = document.getElementById('passcode');
+    const isPassword = inp.type === 'password';
+    inp.type = isPassword ? 'text' : 'password';
+    document.getElementById('toggle-vis').textContent = isPassword ? '🙈' : '👁';
+  }
+
+  // ファイル選択
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+
+  dropZone.addEventListener('click', async () => {
+    if (supportsFS) {
+      try {
+        const handles = await window.showOpenFilePicker({
+          multiple: true,
+          types: [{ description: 'Excel', accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } }]
+        });
+        for (const h of handles) {
+          const f = await h.getFile();
+          if (!files.some(x => x.file.name === f.name && x.file.size === f.size)) {
+            files.push({ file: f, handle: h, status: 'pending' });
+          }
+        }
+        renderFileList();
+      } catch (e) {
+        if (e.name !== 'AbortError') console.error(e);
+      }
+    } else {
+      fileInput.click();
+    }
+  });
+
+  fileInput.addEventListener('change', (e) => {
+    for (const f of e.target.files) {
+      if (f.name.endsWith('.xlsx') && !files.some(x => x.file.name === f.name && x.file.size === f.size)) {
+        files.push({ file: f, handle: null, status: 'pending' });
+      }
+    }
+    fileInput.value = '';
+    renderFileList();
+  });
+
+  dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    for (const f of e.dataTransfer.files) {
+      if (f.name.endsWith('.xlsx') && !files.some(x => x.file.name === f.name && x.file.size === f.size)) {
+        files.push({ file: f, handle: null, status: 'pending' });
+      }
+    }
+    renderFileList();
+  });
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = String(str);
+    return div.innerHTML;
+  }
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  function renderFileList() {
+    const list = document.getElementById('file-list');
+    list.innerHTML = '';
+    files.forEach((item, i) => {
+      const li = document.createElement('li');
+      li.className = 'file-item' + (item.status === 'done' ? ' done' : '') + (item.status === 'error' ? ' error' : '');
+      const icon = item.status === 'done' ? '✅' : item.status === 'error' ? '❌' : item.status === 'processing' ? '⏳' : '📄';
+      li.innerHTML = `
+        <span class="status">${icon}</span>
+        <span class="name">${escapeHtml(item.file.name)}</span>
+        <span class="size">${formatSize(item.file.size)}</span>
+        ${item.status === 'pending' ? `<button class="remove" onclick="removeFile(${i})">✕</button>` : ''}
+      `;
+      list.appendChild(li);
+    });
+    updateRunBtn();
+  }
+
+  function removeFile(i) {
+    files.splice(i, 1);
+    renderFileList();
+  }
+
+  function updateRunBtn() {
+    const btn = document.getElementById('run-btn');
+    const passcode = document.getElementById('passcode').value;
+    btn.disabled = files.length === 0 || !passcode;
+  }
+
+  document.getElementById('passcode').addEventListener('input', updateRunBtn);
+
+  // 実行
+  async function run() {
+    const passcode = document.getElementById('passcode').value;
+    if (!passcode || files.length === 0) return;
+
+    const btn = document.getElementById('run-btn');
+    btn.disabled = true;
+    const progressBar = document.getElementById('progress-bar');
+    const progressFill = document.getElementById('progress-fill');
+    const progressText = document.getElementById('progress-text');
+    const resultEl = document.getElementById('result');
+    resultEl.className = 'result';
+    resultEl.style.display = 'none';
+    progressBar.classList.add('active');
+
+    let successCount = 0;
+    let errorCount = 0;
+    const downloadFiles = []; // FSA非対応時のダウンロード用
+
+    for (let i = 0; i < files.length; i++) {
+      const item = files[i];
+      if (item.status === 'done') continue;
+
+      item.status = 'processing';
+      renderFileList();
+      const pct = Math.round(((i) / files.length) * 100);
+      progressFill.style.width = pct + '%';
+      progressText.textContent = `${i + 1} / ${files.length}: ${item.file.name}`;
+
+      try {
+        const arrayBuffer = await item.file.arrayBuffer();
+
+        let outputBuffer;
+        if (mode === 'encrypt') {
+          // 暗号化: まず平文で読み込み → パスコード付きで書き出し
+          let wb;
+          try {
+            wb = await XlsxPopulate.fromDataAsync(arrayBuffer);
+          } catch (e) {
+            // 既に暗号化されている場合はパスコードで復号を試みる
+            wb = await XlsxPopulate.fromDataAsync(arrayBuffer, { password: passcode });
+          }
+          outputBuffer = await wb.outputAsync({ password: passcode });
+        } else {
+          // 復号: パスコードで読み込み → パスコードなしで書き出し
+          const wb = await XlsxPopulate.fromDataAsync(arrayBuffer, { password: passcode });
+          outputBuffer = await wb.outputAsync();
+        }
+
+        // 保存
+        if (item.handle && supportsFS) {
+          // File System Access API: 上書き保存
+          const writable = await item.handle.createWritable();
+          await writable.write(outputBuffer);
+          await writable.close();
+        } else {
+          // ダウンロード用にバッファを保持
+          downloadFiles.push({ name: item.file.name, buffer: outputBuffer });
+        }
+
+        item.status = 'done';
+        successCount++;
+      } catch (e) {
+        console.error(`Error processing ${item.file.name}:`, e);
+        item.status = 'error';
+        item.errorMsg = e.message;
+        errorCount++;
+      }
+      renderFileList();
+    }
+
+    progressFill.style.width = '100%';
+    progressText.textContent = '';
+
+    // FSA非対応でダウンロードが必要な場合
+    if (downloadFiles.length > 0) {
+      if (downloadFiles.length === 1) {
+        // 1ファイルならそのままダウンロード
+        const blob = new Blob([downloadFiles[0].buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        downloadBlob(blob, downloadFiles[0].name);
+      } else {
+        // 複数ファイルはZIPにまとめてダウンロード
+        const zip = new JSZip();
+        downloadFiles.forEach(f => zip.file(f.name, f.buffer));
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const label = mode === 'encrypt' ? 'encrypted' : 'decrypted';
+        downloadBlob(zipBlob, `excel_${label}_${new Date().toISOString().slice(0,10)}.zip`);
+      }
+    }
+
+    // 結果表示
+    const modeLabel = mode === 'encrypt' ? '暗号化' : '復号';
+    if (errorCount === 0) {
+      resultEl.className = 'result success';
+      const saveNote = (downloadFiles.length > 0 && downloadFiles.length > 1)
+        ? '（ZIPでダウンロードされました）'
+        : downloadFiles.length === 1
+        ? '（ダウンロードされました）'
+        : '（上書き保存完了）';
+      resultEl.textContent = `✅ ${successCount}件すべて${modeLabel}完了 ${saveNote}`;
+    } else {
+      resultEl.className = 'result error';
+      resultEl.textContent = `${modeLabel}完了: 成功 ${successCount}件 / 失敗 ${errorCount}件`;
+    }
+    resultEl.style.display = 'block';
+    btn.disabled = false;
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+</script>
+
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "name": "retaining-wall-karte-editor",
+  "version": "0.1.0",
+  "description": "Railway retaining wall inspection PWA & native app",
+  "scripts": {
+    "build": "mkdir -p www && cp index.html www/ && cp manifest.json www/ 2>/dev/null; cp icon-*.png www/ 2>/dev/null; cp service-worker.js www/ 2>/dev/null; true",
+    "cap:sync": "npm run build && npx cap sync",
+    "cap:open:ios": "npx cap open ios",
+    "cap:open:android": "npx cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.1",
+    "@capacitor/camera": "^6.0.0",
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/filesystem": "^6.0.0",
+    "@capacitor/ios": "^6.2.1",
+    "@capacitor/share": "^6.0.0",
+    "exceljs": "^4.4.0",
+    "xlsx-populate": "^1.21.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.0.0"
+  }
+}

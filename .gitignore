@@ -1,0 +1,26 @@
+# --- 絶対禁止: 業務データ（Excel原本・PDF等） ---
+*.xlsx
+*.xlsm
+*.xls
+*.xlsb
+*.pdf
+
+# macOS
+.DS_Store
+
+# Node / build
+node_modules/
+www/
+ios/
+android/
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# secrets / env
+.env
+.env.*
+*.pem
+*.key
