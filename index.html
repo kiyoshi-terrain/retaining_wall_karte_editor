@@ -1862,6 +1862,10 @@
     // キー: "xl/worksheets/sheetN.xml" のファイルパス, 値: 原本のXML文字列
     let stubbedLegacySheetXml = {};
     let stubbedLegacySheetRelsXml = {};
+    // ExcelJS が load→write でシート名↔sheetN.xml のマッピングをシャッフルするバグの対策:
+    // LOAD 時に各シートの "構造フィンガープリント" を保存し、
+    // SAVE 時に正しい対応を復元する。キー: シート名, 値: {cells, merged}
+    let loadedSheetFingerprints = {};
     let fileHandle = null; // File System Access API用ハンドル
     let appPIN = null; // 認証済みPIN（メモリ上のみ、暗号化/復号に使用）
     let photoResolution = parseInt(localStorage.getItem('slopeKarteResolution')) || 1280; // 写真の解像度（長辺px）
@@ -3324,6 +3328,91 @@
     // シート名マッピング → ファイルパス直接 の2段階フォールバック
     // 復元時にstyle属性をExcelJS出力のインデックスに再マッピング
     // <sheetFormatPr>も原本で復元
+    // ExcelJS バグ対策: load→save でシート名↔sheetN.xml 対応が崩れるのを修復
+    //   load 時に各シートの fingerprint (cells/merged 数) を保存しておき、
+    //   save 後の zip を開いて各 sheetN.xml の fingerprint を計算 → 正しい対応を再構築 →
+    //   workbook.xml.rels の Target を書き換える。
+    async function repairSheetNameMapping(buffer) {
+      if (!loadedSheetFingerprints || Object.keys(loadedSheetFingerprints).length === 0) {
+        return buffer; // fingerprint 未取得なら no-op (後方互換)
+      }
+      try {
+        const zip = await JSZip.loadAsync(buffer);
+        const relsXml = await zip.files['xl/_rels/workbook.xml.rels']?.async('string');
+        const wbXml = await zip.files['xl/workbook.xml']?.async('string');
+        if (!relsXml || !wbXml) return buffer;
+
+        // 1. 保存 zip 内の各 sheetN.xml の fingerprint を計算
+        const savedFingerprints = {}; // sheetFile (e.g. "sheet1.xml") → {cells, merged}
+        for (const name in zip.files) {
+          const m = name.match(/^xl\/worksheets\/(sheet\d+\.xml)$/);
+          if (!m) continue;
+          const xml = await zip.files[name].async('string');
+          const cells = (xml.match(/<c r="/g) || []).length;
+          const merged = (xml.match(/<mergeCell ref="/g) || []).length;
+          savedFingerprints[m[1]] = { cells, merged };
+        }
+
+        // 2. 各シート名 → 最も近い fingerprint を持つ sheetFile を特定
+        const nameToCorrectFile = {};
+        const usedFiles = new Set();
+        // greedy マッチング: 最も類似度が高いペアから順に確定 (1対1制約のため)
+        const candidates = [];
+        for (const [sheetName, origFp] of Object.entries(loadedSheetFingerprints)) {
+          for (const [sheetFile, savedFp] of Object.entries(savedFingerprints)) {
+            const score = Math.abs(savedFp.cells - origFp.cells) + Math.abs(savedFp.merged - origFp.merged);
+            candidates.push({ sheetName, sheetFile, score });
+          }
+        }
+        candidates.sort((a, b) => a.score - b.score);
+        for (const c of candidates) {
+          if (nameToCorrectFile[c.sheetName] || usedFiles.has(c.sheetFile)) continue;
+          nameToCorrectFile[c.sheetName] = c.sheetFile;
+          usedFiles.add(c.sheetFile);
+        }
+
+        // 3. workbook.xml の <sheet name="..." r:id="..."/> を走査して期待される
+        //    rId→correctFile 対応を作り、rels を書き換える
+        let newRelsXml = relsXml;
+        let changedCount = 0;
+        for (const m of wbXml.matchAll(/<sheet\s[^>]*name="([^"]+)"[^>]*r:id="([^"]+)"/g)) {
+          const sheetName = m[1];
+          const rid = m[2];
+          const correctFile = nameToCorrectFile[sheetName];
+          if (!correctFile) continue;
+          const correctTarget = `worksheets/${correctFile}`;
+          // 現在の Target を確認
+          const relMatch = newRelsXml.match(new RegExp(
+            `<Relationship[^>]*Id="${rid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[^>]*Target="([^"]+)"[^>]*/?>`));
+          if (!relMatch) continue;
+          const currentTarget = relMatch[1];
+          if (currentTarget === correctTarget) continue; // 既に正しい
+          // Target を書き換え
+          newRelsXml = newRelsXml.replace(
+            new RegExp(`(<Relationship[^>]*Id="${rid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[^>]*Target=")[^"]+(")`),
+            `$1${correctTarget}$2`
+          );
+          changedCount++;
+          console.log(`[repairSheetMapping] ${sheetName} (${rid}): ${currentTarget} → ${correctTarget}`);
+        }
+
+        if (changedCount === 0) {
+          return buffer; // 既に正しい
+        }
+
+        zip.file('xl/_rels/workbook.xml.rels', newRelsXml);
+        console.log(`[repairSheetMapping] ${changedCount} sheet rel(s) repaired`);
+        return await zip.generateAsync({
+          type: 'arraybuffer',
+          compression: 'DEFLATE',
+          compressionOptions: { level: 6 }
+        });
+      } catch (e) {
+        console.warn('[repairSheetMapping] failed:', e);
+        return buffer;
+      }
+    }
+
     async function fixExcelJSColWidths(buffer) {
       if (Object.keys(savedOriginalColsXml).length === 0 && Object.keys(savedColsByFilePath).length === 0) {
         console.log('列幅修正: 元の<cols>XMLなし、スキップ');
@@ -3789,6 +3878,7 @@
         savedFmtByFilePath = {};
         stubbedLegacySheetXml = {};
         stubbedLegacySheetRelsXml = {};
+        loadedSheetFingerprints = {};
         let zipSheetNames = []; // ZIP内のシート名一覧（ExcelJS読み落とし検出用）
         try {
           const zip = await JSZip.loadAsync(loadBuffer);
@@ -3804,6 +3894,7 @@
           //   で再アプローチする。実ブラウザでは十分速い可能性もあるので一旦様子見。
 
           // 各シートの<cols>XMLと<sheetFormatPr>をシート名・ファイルパス両方のキーで保存
+          // ★ 併せて fingerprint (cells/merged 数) も保存 — 保存後の rels 復元に使う
           for (const [sheetName, sheetFile] of Object.entries(nameToFile)) {
             const fullPath = 'xl/worksheets/' + sheetFile;
             if (zip.files[fullPath]) {
@@ -3818,6 +3909,10 @@
                 savedSheetFormatPr[sheetName] = fmtMatch[0];
                 savedFmtByFilePath[sheetFile] = fmtMatch[0];
               }
+              // 構造フィンガープリント: セル数と結合セル数の組み合わせが各シートで一意
+              const cellCount = (xml.match(/<c r="/g) || []).length;
+              const mergedCount = (xml.match(/<mergeCell ref="/g) || []).length;
+              loadedSheetFingerprints[sheetName] = { cells: cellCount, merged: mergedCount };
             }
           }
           // styles.xmlからNormalフォント(fontId=0)を保存
@@ -6749,6 +6844,13 @@
           }
         }
       } catch (e) { console.warn('writeBufferデバッグ:', e); }
+
+      // ★ シート名↔sheetN.xml の対応を fingerprint で復元 (ExcelJS バグ対策)
+      //   ExcelJS が load→write で sheetN.xml の割り当てを内部 Map の走査順で決めるため、
+      //   workbook.xml の sheet 名 (user 視点では正しい順序) と中身がズレる。
+      //   保存直後の zip を開き、各 sheetN.xml の (cells, merged) を load 時 fingerprint と
+      //   照合して、workbook.xml.rels の Target を正しい sheetN.xml に振り直す。
+      buffer = await repairSheetNameMapping(buffer);
 
       // ExcelJSがデフォルト幅の列にも customWidth="1" を付けてしまう問題を修正
       // オリジナルではwidth="9"の列にcustomWidthがないため、Excelの表示列幅が変わる
