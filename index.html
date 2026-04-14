@@ -1862,6 +1862,10 @@
     // キー: "xl/worksheets/sheetN.xml" のファイルパス, 値: 原本のXML文字列
     let stubbedLegacySheetXml = {};
     let stubbedLegacySheetRelsXml = {};
+    // ★ Phase 1j: 擁壁フォーマット用の delta 保存に使う「原本 zip バッファ」。
+    //   ExcelJS/xlsx-populate に zip 再生成させず、load 時のバイト列を基点に
+    //   必要な XML だけ差し替えて save する。
+    let originalZipBuffer = null;
     let fileHandle = null; // File System Access API用ハンドル
     let appPIN = null; // 認証済みPIN（メモリ上のみ、暗号化/復号に使用）
     let photoResolution = parseInt(localStorage.getItem('slopeKarteResolution')) || 1280; // 写真の解像度（長辺px）
@@ -3775,6 +3779,12 @@
           alert(decryptError.message);
           return;
         }
+
+        // ★ Phase 1j: 擁壁フォーマット save 用に原本 zip バッファを退避
+        //   loadBuffer は復号後のプレーン xlsx zip。この時点のバイト列をコピー保存し、
+        //   save 時は ExcelJS writeBuffer ではなくこのバッファに delta を適用する。
+        originalZipBuffer = loadBuffer.slice(0);
+
         // 元のarrayBufferはもう不要 — GC対象にしてメモリ解放
         arrayBuffer = null;
 
@@ -6534,8 +6544,278 @@
       }
     }
 
+    // ============================
+    // Phase 1j: 原本 zip ベースの delta 保存 (擁壁フォーマット専用)
+    // ============================
+    //
+    // ExcelJS writeBuffer / xlsx-populate passthrough を呼ばず、load 時に退避した
+    // originalZipBuffer をベースにして、変更があった photo だけ XML レベルで差し替える。
+    //
+    // 編集対象:
+    //   - Photo(2) シート XML: 画像セル(labelRow,labelCol)のパス文字列クリア
+    //                          コメントセル(commentRow,commentCol)の値更新 (inline string)
+    //   - xl/media/imageN.*: 新規画像バイナリ追加
+    //   - xl/drawings/drawing3.xml: twoCellAnchor を追加 (画像アンカー)
+    //   - xl/drawings/_rels/drawing3.xml.rels: Relationship 追加
+    //   - [Content_Types].xml: 画像拡張子 MIME を ensure
+
+    // ヘルパー: Photo(2) シートファイルと drawing ファイルのパスを解決
+    async function resolvePhotoSheetPaths(zip) {
+      // workbook.xml から Photo(2) の rId を取得
+      const wbXml = await zip.files['xl/workbook.xml'].async('string');
+      const sheetMatch = wbXml.match(/<sheet[^>]*name="Photo\(2\)"[^>]*r:id="(rId\d+)"/);
+      if (!sheetMatch) throw new Error('Photo(2) シートが workbook.xml に見つかりません');
+      const rId = sheetMatch[1];
+      const wbRelsXml = await zip.files['xl/_rels/workbook.xml.rels'].async('string');
+      const relMatch = wbRelsXml.match(new RegExp(`<Relationship[^>]*Id="${rId}"[^>]*Target="([^"]+)"`));
+      if (!relMatch) throw new Error(`workbook rels に ${rId} が無い`);
+      const sheetFile = 'xl/' + relMatch[1].replace(/^\/?/, '').replace(/^xl\//, '');
+      const sheetFileNorm = sheetFile.startsWith('xl/') ? sheetFile : 'xl/' + sheetFile;
+      // sheet の drawing rel を探す
+      const sheetName = sheetFileNorm.split('/').pop();
+      const sheetRelsPath = `xl/worksheets/_rels/${sheetName}.rels`;
+      let drawingPath = null;
+      if (zip.files[sheetRelsPath]) {
+        const srXml = await zip.files[sheetRelsPath].async('string');
+        const dMatch = srXml.match(/<Relationship[^>]*Target="([^"]*drawings\/[^"]+)"/);
+        if (dMatch) {
+          drawingPath = dMatch[1].replace('../', 'xl/');
+        }
+      }
+      return { sheetPath: sheetFileNorm, sheetRelsPath, drawingPath };
+    }
+
+    // ヘルパー: 次に使える media ファイル名 (image{N}.{ext})
+    function nextMediaName(zip, ext) {
+      const existing = Object.keys(zip.files)
+        .filter(p => p.startsWith('xl/media/'))
+        .map(p => {
+          const m = p.match(/image(\d+)\./);
+          return m ? parseInt(m[1]) : 0;
+        });
+      const maxN = existing.length > 0 ? Math.max(...existing) : 0;
+      return `image${maxN + 1}.${ext}`;
+    }
+
+    // ヘルパー: drawing rels で次に使える rId
+    function nextDrawingRId(relsXml) {
+      const ids = [...relsXml.matchAll(/Id="rId(\d+)"/g)].map(m => parseInt(m[1]));
+      const maxN = ids.length > 0 ? Math.max(...ids) : 0;
+      return `rId${maxN + 1}`;
+    }
+
+    // ヘルパー: drawing3.xml に新しい twoCellAnchor を挿入
+    //   擁壁フォーマットの配置:
+    //     from: (labelCol-1, labelRow-1) 0-indexed  (画像セルの左上)
+    //     to:   (labelCol-1 + 20, labelRow-1 + 22)  (21列×22行枠にフィット)
+    function buildTwoCellAnchor(photo, rId, picId) {
+      const fromCol = photo.labelCol - 1;
+      const fromRow = photo.labelRow - 1;
+      const toCol = fromCol + 20;
+      const toRow = fromRow + 22;
+      return (
+        `<xdr:twoCellAnchor editAs="oneCell">` +
+          `<xdr:from><xdr:col>${fromCol}</xdr:col><xdr:colOff>0</xdr:colOff>` +
+                    `<xdr:row>${fromRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>` +
+          `<xdr:to><xdr:col>${toCol}</xdr:col><xdr:colOff>0</xdr:colOff>` +
+                  `<xdr:row>${toRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>` +
+          `<xdr:pic>` +
+            `<xdr:nvPicPr>` +
+              `<xdr:cNvPr id="${picId}" name="Picture ${picId}" descr="${escapeXml(photo.filename || photo.label)}"/>` +
+              `<xdr:cNvPicPr><a:picLocks noChangeAspect="1" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/></xdr:cNvPicPr>` +
+            `</xdr:nvPicPr>` +
+            `<xdr:blipFill>` +
+              `<a:blip xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${rId}"/>` +
+              `<a:stretch xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:fillRect/></a:stretch>` +
+            `</xdr:blipFill>` +
+            `<xdr:spPr>` +
+              `<a:xfrm xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>` +
+              `<a:prstGeom prst="rect" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:avLst/></a:prstGeom>` +
+            `</xdr:spPr>` +
+          `</xdr:pic>` +
+          `<xdr:clientData/>` +
+        `</xdr:twoCellAnchor>`
+      );
+    }
+
+    function escapeXml(s) {
+      return String(s).replace(/[<>&"']/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[c]));
+    }
+
+    // ヘルパー: シート XML 内の特定セルの値を書き換え or 追加 (inline string として)
+    //   既存セルがあれば value 要素を差し替え、無ければ該当 row に追記
+    function writeInlineStringCell(sheetXml, cellRef, text) {
+      const rowMatch = cellRef.match(/^([A-Z]+)(\d+)$/);
+      if (!rowMatch) return sheetXml;
+      const rowNum = rowMatch[2];
+      const xmlText = escapeXml(text);
+      const newCell = `<c r="${cellRef}" t="inlineStr"><is><t xml:space="preserve">${xmlText}</t></is></c>`;
+
+      // 既存の <c r="X"> があれば置換
+      const cellRe = new RegExp(`<c r="${cellRef}"[^/]*?(?:\\/>|>[\\s\\S]*?<\\/c>)`);
+      if (cellRe.test(sheetXml)) {
+        return sheetXml.replace(cellRe, newCell);
+      }
+      // 該当 row があれば末尾に追加
+      const rowRe = new RegExp(`(<row[^>]*r="${rowNum}"[^>]*>)([\\s\\S]*?)(<\\/row>)`);
+      const rowMatch2 = sheetXml.match(rowRe);
+      if (rowMatch2) {
+        return sheetXml.replace(rowRe, `$1$2${newCell}$3`);
+      }
+      // row も無いなら <sheetData> の末尾に新規 row 追加
+      return sheetXml.replace('</sheetData>', `<row r="${rowNum}">${newCell}</row></sheetData>`);
+    }
+
+    // ヘルパー: シート XML 内の特定セルの値だけクリア (セル自体は残す)
+    function clearCellValue(sheetXml, cellRef) {
+      const cellRe = new RegExp(`<c r="${cellRef}"([^/]*?)(?:\\/>|>[\\s\\S]*?<\\/c>)`);
+      return sheetXml.replace(cellRe, (match, attrs) => {
+        // t 属性を外して値を空に
+        const cleanAttrs = attrs.replace(/\s*t="[^"]*"/, '');
+        return `<c r="${cellRef}"${cleanAttrs}/>`;
+      });
+    }
+
+    // 本体: 擁壁フォーマット用の delta 保存
+    async function buildSaveBlobRetainingWall() {
+      if (!originalZipBuffer) {
+        throw new Error('原本ZIPバッファ未退避: ファイルを開き直してください');
+      }
+      const zip = await JSZip.loadAsync(originalZipBuffer);
+      const { sheetPath, drawingPath } = await resolvePhotoSheetPaths(zip);
+      console.log(`[delta-save] Photo(2) sheet=${sheetPath}, drawing=${drawingPath}`);
+
+      const modifiedPhotos = photoData.filter(p => p.isModified);
+      console.log(`[delta-save] modified photos: ${modifiedPhotos.length}`);
+
+      if (modifiedPhotos.length === 0) {
+        // 変更なし → 原本そのまま返す
+        return new Blob([originalZipBuffer], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        });
+      }
+
+      // シート XML とドローイング XML をロード
+      let sheetXml = await zip.files[sheetPath].async('string');
+      let drawingXml = drawingPath && zip.files[drawingPath]
+        ? await zip.files[drawingPath].async('string') : null;
+      const drawingRelsPath = drawingPath
+        ? drawingPath.replace('drawings/', 'drawings/_rels/') + '.rels' : null;
+      let drawingRelsXml = drawingRelsPath && zip.files[drawingRelsPath]
+        ? await zip.files[drawingRelsPath].async('string') : null;
+      let ctXml = await zip.files['[Content_Types].xml'].async('string');
+
+      // 画像 ID 採番用 (drawing 内 cNvPr id は unique, drawing 内 rId は drawing-rel内 unique)
+      const existingPicIds = drawingXml
+        ? [...drawingXml.matchAll(/<xdr:cNvPr id="(\d+)"/g)].map(m => parseInt(m[1]))
+        : [];
+      let nextPicId = (existingPicIds.length ? Math.max(...existingPicIds) : 0) + 1;
+
+      // 各変更photoを処理
+      for (const photo of modifiedPhotos) {
+        // A. コメント更新
+        const commentText = photo.comment
+          ? `（コメント）\n${photo.comment}`
+          : '（コメント）';
+        const commentRef = colNumToLetter(photo.commentCol) + photo.commentRow;
+        sheetXml = writeInlineStringCell(sheetXml, commentRef, commentText);
+
+        // B. 新規画像
+        if (photo.imageBase64) {
+          const match = photo.imageBase64.match(/^data:image\/(\w+);base64,(.+)$/);
+          if (!match) {
+            console.warn(`画像データ不正: ${photo.label}`);
+            continue;
+          }
+          const ext = match[1] === 'jpg' ? 'jpeg' : match[1];
+          const base64 = match[2];
+          const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+
+          // 1. media 追加
+          const mediaName = nextMediaName(zip, ext);
+          zip.file(`xl/media/${mediaName}`, bytes);
+
+          // 2. Content_Types に MIME ensure
+          const mime = ext === 'png' ? 'image/png' : (ext === 'jpeg' ? 'image/jpeg' : `image/${ext}`);
+          if (!new RegExp(`<Default[^>]*Extension="${ext}"`).test(ctXml)) {
+            ctXml = ctXml.replace('</Types>', `<Default Extension="${ext}" ContentType="${mime}"/></Types>`);
+          }
+
+          // 3. drawing rels に Relationship 追加
+          if (!drawingXml || !drawingRelsXml) {
+            console.warn('Photo(2) に drawing がリンクされていない — スキップ');
+            continue;
+          }
+          const newRId = nextDrawingRId(drawingRelsXml);
+          const newRel = `<Relationship Id="${newRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${mediaName}"/>`;
+          drawingRelsXml = drawingRelsXml.replace('</Relationships>', `${newRel}</Relationships>`);
+
+          // 4. drawing xml に twoCellAnchor 追加
+          const anchorXml = buildTwoCellAnchor(photo, newRId, nextPicId);
+          nextPicId++;
+          drawingXml = drawingXml.replace(/<\/xdr:wsDr>/, `${anchorXml}</xdr:wsDr>`);
+
+          // 5. 画像セル(labelRow,labelCol)のパス文字列をクリア
+          const imgCellRef = colNumToLetter(photo.labelCol) + photo.labelRow;
+          sheetXml = clearCellValue(sheetXml, imgCellRef);
+
+          console.log(`[delta-save] 画像追加: ${photo.label} → media/${mediaName} anchor=${newRId} picId=${nextPicId - 1}`);
+        }
+      }
+
+      // 書き戻し
+      zip.file(sheetPath, sheetXml);
+      if (drawingXml && drawingPath) zip.file(drawingPath, drawingXml);
+      if (drawingRelsXml && drawingRelsPath) zip.file(drawingRelsPath, drawingRelsXml);
+      zip.file('[Content_Types].xml', ctXml);
+
+      // zip 生成
+      const buffer = await zip.generateAsync({
+        type: 'arraybuffer',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 }
+      });
+
+      // IDB 用プレーンバッファ保持
+      lastPlainBuffer = buffer;
+
+      // PIN があれば xlsx-populate で暗号化
+      if (appPIN) {
+        const xlsxWb = await XlsxPopulate.fromDataAsync(buffer);
+        const encrypted = await xlsxWb.outputAsync({ password: appPIN, type: 'arraybuffer' });
+        return new Blob([encrypted], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        });
+      }
+
+      return new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      });
+    }
+
+    function colNumToLetter(n) {
+      let s = '';
+      while (n > 0) {
+        const r = (n - 1) % 26;
+        s = String.fromCharCode(65 + r) + s;
+        n = Math.floor((n - 1) / 26);
+      }
+      return s;
+    }
+
     // ワークブックの変更をExcelに書き戻し、Blobを生成（保存共通処理）
     async function prepareAndBuildBlob() {
+      // ★ Phase 1j: 擁壁フォーマット (Photo(2)) は delta 保存経路を使う
+      //   photoData の formatType を見て判定。mixed sheet (figシート編集等) がある場合は
+      //   既存パイプラインを使う必要があるが、Phase 1 MVP では Photo(2) のみ想定。
+      const isRetaining = photoData.length > 0 && photoData[0].formatType === 'retaining';
+      const hasFigEdits = Object.values(annotationData || {}).some(a => a && a.isModified);
+      if (isRetaining && !hasFigEdits) {
+        console.log('[prepareAndBuildBlob] 擁壁 delta 保存経路を使用');
+        return await buildSaveBlobRetainingWall();
+      }
+      console.log('[prepareAndBuildBlob] 従来の ExcelJS writeBuffer 経路を使用');
+
       const sheet = workbook.getWorksheet(currentSheetName);
 
       // コメントをExcelに書き戻す（3列対応）
