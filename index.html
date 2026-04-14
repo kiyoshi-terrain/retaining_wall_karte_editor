@@ -3130,6 +3130,73 @@
       try {
         const zip = await JSZip.loadAsync(buffer);
 
+        // --- ★ 先行パス: fingerprint による rels 書き換え ---
+        //   loadedSheetFingerprints があれば、fixZipSheetRefs に入る前に
+        //   「各シート名の content が実際にどの sheetN.xml にあるか」を fingerprint で特定し、
+        //   workbook.xml.rels の Target を正しい sheetN.xml に振り直す。
+        //   これによりファイルのリネーム不要で content↔name 対応が整う。
+        if (Object.keys(loadedSheetFingerprints).length > 0) {
+          try {
+            let wbXmlEarly = await zip.files['xl/workbook.xml'].async('string');
+            let relsXmlEarly = await zip.files['xl/_rels/workbook.xml.rels'].async('string');
+
+            // 物理ファイルの fingerprint を計算
+            const physicalFiles = Object.keys(zip.files)
+              .filter(f => /^xl\/worksheets\/sheet\d+\.xml$/.test(f))
+              .map(f => f.replace('xl/worksheets/', ''));
+            const physFp = {};
+            for (const f of physicalFiles) {
+              const xml = await zip.files['xl/worksheets/' + f].async('string');
+              physFp[f] = {
+                cells: (xml.match(/<c r="/g) || []).length,
+                merged: (xml.match(/<mergeCell ref="/g) || []).length,
+              };
+            }
+
+            // 各シート名 → 最も類似する physical file を探す (greedy)
+            const candidates = [];
+            for (const m of wbXmlEarly.matchAll(/<sheet\s+[^>]*?name="([^"]+)"[^>]*?r:id="([^"]+)"/g)) {
+              const [, sheetName, rId] = m;
+              const loadFp = loadedSheetFingerprints[sheetName];
+              if (!loadFp) continue;
+              for (const f of physicalFiles) {
+                const score = Math.abs(physFp[f].cells - loadFp.cells) + Math.abs(physFp[f].merged - loadFp.merged);
+                candidates.push({ sheetName, rId, file: f, score });
+              }
+            }
+            candidates.sort((a, b) => a.score - b.score);
+            const usedNames = new Set();
+            const usedFiles = new Set();
+            const correctMap = {}; // rId → correct sheet file
+            for (const c of candidates) {
+              if (usedNames.has(c.sheetName) || usedFiles.has(c.file)) continue;
+              correctMap[c.rId] = c.file;
+              usedNames.add(c.sheetName);
+              usedFiles.add(c.file);
+            }
+
+            // rels の Target を書き換え
+            let changed = 0;
+            for (const [rId, correctFile] of Object.entries(correctMap)) {
+              const rIdEsc = rId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const re = new RegExp(`(<Relationship[^>]*Id="${rIdEsc}"[^>]*Target="worksheets/)(sheet\\d+\\.xml)(")`);
+              const m2 = relsXmlEarly.match(re);
+              if (m2 && m2[2] !== correctFile) {
+                relsXmlEarly = relsXmlEarly.replace(re, `$1${correctFile}$3`);
+                changed++;
+                console.log(`[fingerprint-rels] ${rId}: ${m2[2]} → ${correctFile}`);
+              }
+            }
+
+            if (changed > 0) {
+              zip.file('xl/_rels/workbook.xml.rels', relsXmlEarly);
+              console.log(`[fingerprint-rels] ${changed} rel(s) rewritten by fingerprint`);
+            }
+          } catch (err) {
+            console.warn('[fingerprint-rels] pre-pass failed:', err);
+          }
+        }
+
         // --- Step 1: relsからrId→ファイル名マップを構築 ---
         const relsXml = await zip.files['xl/_rels/workbook.xml.rels'].async('string');
         const rIdToNewFile = {}; // { rId1: 'sheet1.xml', rId2: 'sheet2.xml', ... }
@@ -3179,11 +3246,56 @@
 
         console.log('シートリマッピング: orphaned=', orphanedFiles, 'missing=', missingNew);
 
-        // --- Step 5: orphanedFiles → missingNewへのマッピング（順番対応） ---
+        // --- Step 5: orphanedFiles → missingNew へのマッピング ---
+        //   位置ベースペアリングは content↔name 対応を破壊するため、
+        //   loadedSheetFingerprints (load 時に計算した各シートの cells/merged 数) があれば
+        //   構造フィンガープリント照合で正しい対応を決定する。fingerprint 不在時は
+        //   後方互換として元の位置ベースロジックにフォールバック。
         const mapping = []; // { from, to }
-        for (let i = 0; i < Math.min(orphanedFiles.length, missingNew.length); i++) {
-          if (orphanedFiles[i] !== missingNew[i]) {
-            mapping.push({ from: orphanedFiles[i], to: missingNew[i] });
+
+        // orphaned 側の fingerprint を計算
+        const orphanFp = {};
+        for (const f of orphanedFiles) {
+          const xml = await zip.files['xl/worksheets/' + f].async('string');
+          orphanFp[f] = {
+            cells: (xml.match(/<c r="/g) || []).length,
+            merged: (xml.match(/<mergeCell ref="/g) || []).length,
+          };
+        }
+
+        const missingEntries = sheetEntries.filter(e => e.newFile && !ctFiles.has(e.newFile));
+
+        if (Object.keys(loadedSheetFingerprints).length > 0) {
+          // fingerprint 照合: シート名 ↔ orphan を最も類似度高いペアから確定
+          const candidates = [];
+          for (const entry of missingEntries) {
+            const loadFp = loadedSheetFingerprints[entry.name];
+            if (!loadFp) continue;
+            for (const orphan of orphanedFiles) {
+              const oFp = orphanFp[orphan];
+              const score = Math.abs(oFp.cells - loadFp.cells) + Math.abs(oFp.merged - loadFp.merged);
+              candidates.push({ entryName: entry.name, newFile: entry.newFile, orphan, score });
+            }
+          }
+          candidates.sort((a, b) => a.score - b.score);
+          const usedNames = new Set();
+          const usedOrphans = new Set();
+          for (const c of candidates) {
+            if (usedNames.has(c.entryName) || usedOrphans.has(c.orphan)) continue;
+            if (c.newFile !== c.orphan) {
+              mapping.push({ from: c.orphan, to: c.newFile, _name: c.entryName, _score: c.score });
+            }
+            usedNames.add(c.entryName);
+            usedOrphans.add(c.orphan);
+          }
+          console.log('[fixZipSheetRefs] fingerprint-based pairing:',
+            mapping.map(m => `${m._name}: ${m.from}→${m.to} (score=${m._score})`).join(', '));
+        } else {
+          // フォールバック (fingerprint 未登録時): 元の位置ベース
+          for (let i = 0; i < Math.min(orphanedFiles.length, missingNew.length); i++) {
+            if (orphanedFiles[i] !== missingNew[i]) {
+              mapping.push({ from: orphanedFiles[i], to: missingNew[i] });
+            }
           }
         }
 
