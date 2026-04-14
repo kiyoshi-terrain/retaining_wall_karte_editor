@@ -6783,8 +6783,12 @@
       buffer = await fixExcelJSColWidths(buffer);
 
       // ★ Phase 1g: ロード時に空スタブへ差し替えたレガシー/マクロ用シートを復元
-      //   (Photo123 等は ExcelJS が空のまま再出力してしまうので、原本XMLで上書き戻す)
-      if (Object.keys(stubbedLegacySheetXml).length > 0 || Object.keys(stubbedLegacySheetRelsXml).length > 0) {
+      //   ⚠️ 保留中: ExcelJS がロード→保存でシートXMLファイル番号を振り直すため、
+      //     元のファイルパス (xl/worksheets/sheet6.xml など) に書き戻しても
+      //     別のシートに割り当てられた位置を破壊してしまう。
+      //     固定パス→シート名で解決してから書き戻す必要があるため、一旦無効化。
+      //     代わりに保存時に正しいパスを解決する実装を追加するまで、Photo123 は空のまま保存される。
+      if (false && (Object.keys(stubbedLegacySheetXml).length > 0 || Object.keys(stubbedLegacySheetRelsXml).length > 0)) {
         try {
           const zip = await JSZip.loadAsync(buffer);
           for (const [path, xml] of Object.entries(stubbedLegacySheetXml)) {
