@@ -6989,18 +6989,30 @@
       if (isSaving) return; // 連打防止
       // showSaveFilePicker対応ブラウザなら保存ダイアログを表示
       if ('showSaveFilePicker' in window) {
-        isSaving = true;
-        showLoading('Saving...');
+        // ★ 重要: showSaveFilePicker は user gesture と同じ tick で呼ぶ必要がある。
+        //   prepareAndBuildBlob() は数百MB級xlsxで数秒かかるため、await を挟むと
+        //   "Must be handling a user gesture" エラーになる。
+        //   picker を先に開いてハンドルを確定させてから、重い処理に入る。
+        let newHandle;
         try {
-          const blob = await prepareAndBuildBlob();
-
-          const newHandle = await window.showSaveFilePicker({
-            suggestedName: currentFileName || 'slope_karte.xlsx',
+          newHandle = await window.showSaveFilePicker({
+            suggestedName: currentFileName || 'retaining_wall_karte.xlsx',
             types: [{
               description: 'Excel File',
               accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] }
             }]
           });
+        } catch (err) {
+          // ユーザーがキャンセル (AbortError) の場合は静かに戻る
+          if (err.name === 'AbortError') return;
+          alert('Failed to open save dialog: ' + err.message);
+          return;
+        }
+
+        isSaving = true;
+        showLoading('Saving...');
+        try {
+          const blob = await prepareAndBuildBlob();
           const writable = await newHandle.createWritable();
           await writable.write(blob);
           await writable.close();
@@ -7018,9 +7030,7 @@
           hideLoading();
         } catch (err) {
           hideLoading();
-          if (err.name !== 'AbortError') {
-            alert('Failed to save: ' + err.message);
-          }
+          alert('Failed to save: ' + err.message);
         } finally {
           isSaving = false;
         }
