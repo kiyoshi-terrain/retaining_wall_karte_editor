@@ -3769,8 +3769,13 @@
         // Step 2: リマップされたZIPを修正
         const fixedBuffer = await fixZipSheetRefs(passedBuffer);
 
+        // Step 2.4: ★ fixZipSheetRefs は位置ベースで orphaned sheet をリネームするため、
+        //   content (sheet body) と name (workbook.xml の sheet 名) の対応を破壊している。
+        //   fingerprint 照合で workbook.xml.rels の Target を正しい sheetN.xml に書き戻す。
+        const repairedBuffer = await repairSheetNameMapping(fixedBuffer);
+
         // Step 2.5: xlsx-populateが列幅を壊すので再度XMLレベルで復元
-        const colFixedBuffer = await fixExcelJSColWidths(fixedBuffer);
+        const colFixedBuffer = await fixExcelJSColWidths(repairedBuffer);
 
         // Step 3: 修正済みZIPをxlsx-populateで暗号化
         const xlsxWb2 = await XlsxPopulate.fromDataAsync(colFixedBuffer);
