@@ -3947,7 +3947,12 @@
     // 写真シート解析（3列構造対応）
     function parsePhotoSheet(sheet) {
       showLoading('Analyzing photo data...');
-      
+
+      // フォーマット判定: 擁壁テンプレートは "調査結果写真" ヘッダが69行周期で繰り返される
+      if (detectRetainingWallPhotoFormat(sheet)) {
+        return parsePhotoSheetRetainingWall(sheet);
+      }
+
       // セル値を安全に取得するヘルパー関数
       function getCellText(cell) {
         if (!cell || !cell.value) return '';
@@ -4115,6 +4120,182 @@
         isModified: false
       }));
       
+      renderPhotoGrid();
+      updateStats();
+      hideLoading();
+    }
+
+    // ============================
+    // 擁壁テンプレート用 Photo(2) パーサー
+    // ============================
+    //
+    // 擁壁版 Excel テンプレートの Photoシート構造:
+    //   - ページヘッダ "調査結果写真" が 69行周期で繰り返される (21ページ想定)
+    //   - 各ページに 2段(上/下) × 3列(A/V/AQ) = 6枠
+    //   - 画像セル: B列/W列/AR列 (col=2/23/44) — 各グループの先頭列の1つ右
+    //   - 画像行オフセット: pageBase + 2 (上段), pageBase + 35 (下段)
+    //   - コメント行: 画像行 + 24 (同じ列グループの A/V/AQ)
+    //   - 画像は Excel 埋め込みではなく **セル値にパス文字列** として格納されている場合あり
+    //     (例: "Z:\\大竹\\Kku27\\R0022542.JPG") — 現場ではリンク先不明なので未撮影枠扱い
+    //   - 通番は BL列 (col=64) に 1,2,3... が入る
+
+    function detectRetainingWallPhotoFormat(sheet) {
+      // F列(col=6) の先頭100行以内に "調査結果写真" があれば擁壁フォーマット
+      const maxScan = Math.min(100, sheet.rowCount || 100);
+      for (let row = 1; row <= maxScan; row++) {
+        const cell = sheet.getCell(row, 6);
+        const v = cell && cell.value;
+        const s = (typeof v === 'string') ? v
+                : (v && v.richText) ? v.richText.map(rt => rt.text || '').join('')
+                : (v && v.text) ? String(v.text)
+                : '';
+        if (s.includes('調査結果写真')) return true;
+      }
+      return false;
+    }
+
+    function parsePhotoSheetRetainingWall(sheet) {
+      // getCellText (parsePhotoSheet 内のものと同等だが、分岐後に再帰呼びしてないのでローカル定義)
+      function getCellText(cell) {
+        if (!cell || cell.value == null) return '';
+        const val = cell.value;
+        if (typeof val === 'object') {
+          if (val.richText && Array.isArray(val.richText)) {
+            return val.richText.map(rt => rt.text || '').join('');
+          }
+          if (val.text != null) return String(val.text);
+          if (val.result !== undefined) return String(val.result);
+          try { return JSON.stringify(val); } catch (e) { return ''; }
+        }
+        return String(val);
+      }
+
+      // 1) ページヘッダ "調査結果写真" の行番号を収集
+      const pageBases = [];
+      for (let row = 1; row <= sheet.rowCount; row++) {
+        const v = getCellText(sheet.getCell(row, 6)).trim();
+        if (v === '調査結果写真') pageBases.push(row);
+      }
+      console.log(`[RetainingWall] pages detected: ${pageBases.length}`);
+
+      // 2) フレーム座標を生成
+      const COMMENT_COLS = [1, 22, 43];   // コメント列 (A/V/AQ)
+      const IMAGE_COLS   = [2, 23, 44];   // 画像セル列 (B/W/AR)
+      const FRAME_OFFSETS = [
+        { imageOffset: 2,  commentOffset: 26 }, // 上段
+        { imageOffset: 35, commentOffset: 59 }  // 下段
+      ];
+
+      // 3) ExcelJS 埋め込み画像 (万が一埋め込まれている場合に備える)
+      const images = sheet.getImages();
+      const imageDataList = [];
+      images.forEach(img => {
+        const image = workbook.getImage(img.imageId);
+        if (image && image.buffer) {
+          const blob = new Blob([new Uint8Array(image.buffer)], { type: `image/${image.extension || 'jpeg'}` });
+          const dataUrl = URL.createObjectURL(blob);
+          const row = img.range && img.range.tl ? img.range.tl.row : 0;
+          const col = img.range && img.range.tl ? img.range.tl.col : 0;
+          imageDataList.push({ dataUrl, row, col });
+        }
+      });
+
+      // 4) 各ページの6枠を走査して photoEntries を構築
+      const photoEntries = [];
+      let frameIndex = 0;
+      pageBases.forEach((pageBase, pageIdx) => {
+        FRAME_OFFSETS.forEach(offset => {
+          for (let ci = 0; ci < 3; ci++) {
+            const commentCol = COMMENT_COLS[ci];
+            const imageCol   = IMAGE_COLS[ci];
+            const imageRow   = pageBase + offset.imageOffset;
+            const commentRow = pageBase + offset.commentOffset;
+
+            // 画像セル (パス文字列が入っている可能性あり)
+            const imgCellValue = getCellText(sheet.getCell(imageRow, imageCol)).trim();
+            const pathString = /^".+\.(jpg|jpeg|png|bmp|gif)"?\s*$/i.test(imgCellValue) ? imgCellValue : '';
+
+            // コメント (同じ列グループのコメント列)
+            const commentRaw = getCellText(sheet.getCell(commentRow, commentCol));
+            let comment = '';
+            if (commentRaw.includes('コメント')) {
+              const lines = commentRaw.split('\n');
+              if (lines.length > 1) {
+                comment = lines.slice(1).join('\n').trim();
+              } else {
+                comment = commentRaw.replace(/[（(]コメント[）)]/g, '').trim();
+              }
+            }
+
+            // ラベルは通し番号 (1..N)。BL列はページ内ローカル行番号(リセット)のため利用しない
+            const label = String(frameIndex + 1);
+
+            // パス文字列からファイル名抽出 (将来、Drive Photos/ から同名ファイルを探す手がかりに)
+            let filename = '';
+            if (pathString) {
+              const m = pathString.match(/([^\\\/"']+\.\w{3,4})/i);
+              if (m) filename = m[1];
+            }
+
+            photoEntries.push({
+              label,
+              labelRow: imageRow,    // 画像アンカー位置
+              labelCol: imageCol,    // B/W/AR
+              commentRow,
+              commentCol,
+              comment,
+              filename,
+              imageBase64: null,
+              pathString,
+              isDummy: !pathString && comment.trim() === ''
+            });
+            frameIndex++;
+          }
+        });
+      });
+
+      // 5) 埋め込み画像があればアンカーでマッチング
+      imageDataList.forEach(img => {
+        let colGroup;
+        if (img.col < 15) colGroup = 2;
+        else if (img.col < 35) colGroup = 23;
+        else colGroup = 44;
+
+        let bestEntry = null;
+        let bestDist = Infinity;
+        for (const entry of photoEntries) {
+          if (entry.labelCol !== colGroup) continue;
+          const anchorRow0 = entry.labelRow - 1;
+          const dist = Math.abs(img.row - anchorRow0);
+          if (dist < bestDist && dist < 5) {
+            bestDist = dist;
+            bestEntry = entry;
+          }
+        }
+        if (bestEntry) bestEntry.imageBase64 = img.dataUrl;
+      });
+
+      // 6) photoData に反映
+      photoData = photoEntries.map((entry, index) => ({
+        index,
+        label: entry.label,
+        labelRow: entry.labelRow,
+        labelCol: entry.labelCol,
+        commentRow: entry.commentRow,
+        commentCol: entry.commentCol,
+        imageBase64: entry.imageBase64,
+        comment: entry.comment,
+        filename: entry.filename || '',
+        pathString: entry.pathString || '',
+        isDummy: !entry.imageBase64 && !entry.pathString && entry.comment.trim() === '',
+        isModified: false
+      }));
+
+      const withPath = photoData.filter(e => e.pathString).length;
+      const withEmbed = photoData.filter(e => e.imageBase64).length;
+      const withComment = photoData.filter(e => e.comment.trim() !== '').length;
+      console.log(`[RetainingWall] frames=${photoData.length} withPathString=${withPath} embedded=${withEmbed} withComment=${withComment}`);
+
       renderPhotoGrid();
       updateStats();
       hideLoading();
