@@ -3129,6 +3129,7 @@
     async function fixZipSheetRefs(buffer) {
       try {
         const zip = await JSZip.loadAsync(buffer);
+        let earlyRelsChanged = false; // fingerprint 先行パスで rels を変更したか
 
         // --- ★ 先行パス: fingerprint による rels 書き換え ---
         //   loadedSheetFingerprints があれば、fixZipSheetRefs に入る前に
@@ -3191,6 +3192,7 @@
             if (changed > 0) {
               zip.file('xl/_rels/workbook.xml.rels', relsXmlEarly);
               console.log(`[fingerprint-rels] ${changed} rel(s) rewritten by fingerprint`);
+              earlyRelsChanged = true;
             }
           } catch (err) {
             console.warn('[fingerprint-rels] pre-pass failed:', err);
@@ -3241,6 +3243,14 @@
 
         if (orphanedFiles.length === 0 && missingNew.length === 0) {
           console.log('ZIP修正不要（シート参照一致）');
+          // fingerprint 先行パスで rels を書き換えていた場合は zip を再生成して返す
+          if (earlyRelsChanged) {
+            return await zip.generateAsync({
+              type: 'arraybuffer',
+              compression: 'DEFLATE',
+              compressionOptions: { level: 6 }
+            });
+          }
           return buffer;
         }
 
