@@ -6688,22 +6688,22 @@
       const modifiedPhotos = photoData.filter(p => p.isModified);
       console.log(`[delta-save] modified photos: ${modifiedPhotos.length}`);
 
-      if (modifiedPhotos.length === 0) {
-        // 変更なし → 原本そのまま返す
-        return new Blob([originalZipBuffer], {
-          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        });
-      }
+      // 変更なし: 原本 zip をそのまま使う (ただし PIN があれば暗号化は必要なので下の共通処理に流す)
+      const noChanges = modifiedPhotos.length === 0;
 
-      // シート XML とドローイング XML をロード
-      let sheetXml = await zip.files[sheetPath].async('string');
-      let drawingXml = drawingPath && zip.files[drawingPath]
-        ? await zip.files[drawingPath].async('string') : null;
-      const drawingRelsPath = drawingPath
-        ? drawingPath.replace('drawings/', 'drawings/_rels/') + '.rels' : null;
-      let drawingRelsXml = drawingRelsPath && zip.files[drawingRelsPath]
-        ? await zip.files[drawingRelsPath].async('string') : null;
-      let ctXml = await zip.files['[Content_Types].xml'].async('string');
+      // 変更がある場合のみ XML ロード (変更なしでは zip にも触らず原本バイトそのまま)
+      let sheetXml, drawingXml, drawingRelsXml, ctXml;
+      let drawingRelsPath = null;
+      if (!noChanges) {
+        sheetXml = await zip.files[sheetPath].async('string');
+        drawingXml = drawingPath && zip.files[drawingPath]
+          ? await zip.files[drawingPath].async('string') : null;
+        drawingRelsPath = drawingPath
+          ? drawingPath.replace('drawings/', 'drawings/_rels/') + '.rels' : null;
+        drawingRelsXml = drawingRelsPath && zip.files[drawingRelsPath]
+          ? await zip.files[drawingRelsPath].async('string') : null;
+        ctXml = await zip.files['[Content_Types].xml'].async('string');
+      }
 
       // 画像 ID 採番用 (drawing 内 cNvPr id は unique, drawing 内 rId は drawing-rel内 unique)
       const existingPicIds = drawingXml
@@ -6763,18 +6763,22 @@
         }
       }
 
-      // 書き戻し
-      zip.file(sheetPath, sheetXml);
-      if (drawingXml && drawingPath) zip.file(drawingPath, drawingXml);
-      if (drawingRelsXml && drawingRelsPath) zip.file(drawingRelsPath, drawingRelsXml);
-      zip.file('[Content_Types].xml', ctXml);
-
-      // zip 生成
-      const buffer = await zip.generateAsync({
-        type: 'arraybuffer',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 6 }
-      });
+      // 書き戻し (変更があった場合のみ)
+      let buffer;
+      if (!noChanges) {
+        zip.file(sheetPath, sheetXml);
+        if (drawingXml && drawingPath) zip.file(drawingPath, drawingXml);
+        if (drawingRelsXml && drawingRelsPath) zip.file(drawingRelsPath, drawingRelsXml);
+        zip.file('[Content_Types].xml', ctXml);
+        buffer = await zip.generateAsync({
+          type: 'arraybuffer',
+          compression: 'DEFLATE',
+          compressionOptions: { level: 6 }
+        });
+      } else {
+        // 変更なし: 原本バイトをそのまま使用 (暗号化処理は共通)
+        buffer = originalZipBuffer.slice(0);
+      }
 
       // IDB 用プレーンバッファ保持
       lastPlainBuffer = buffer;
