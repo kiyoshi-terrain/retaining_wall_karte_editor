@@ -581,6 +581,28 @@
       margin-bottom: 8px;
     }
 
+    /* パス文字列枠 (擁壁テンプレート: 元写真のローカルリンクが切れている状態) */
+    .photo-frame .placeholder-link-lost {
+      color: #8a5a00;
+      background: #fff7d6;
+    }
+
+    .photo-frame .placeholder-link-lost .placeholder-icon {
+      color: #b88400;
+    }
+
+    .photo-frame .placeholder-link-lost .placeholder-sub {
+      margin-top: 4px;
+      font-size: 11px;
+      color: #5a5a5a;
+    }
+
+    .photo-filename .photo-link-lost {
+      color: #b00020;
+      font-weight: 700;
+      margin-left: 6px;
+    }
+
     .photo-label {
       position: absolute;
       top: 8px;
@@ -4325,16 +4347,25 @@
 
         const labelClass = photo.isDummy ? 'photo-label dummy' : 'photo-label';
 
+        // パス文字列枠 (擁壁テンプレートで元写真がPC上のZ:\に残っている状態)
+        const isLinkLost = !photo.imageBase64 && photo.pathString;
+
         card.innerHTML = `
-          ${photo.filename ? `<div class="photo-filename">${escapeHtml(photo.filename)}</div>` : ''}
+          ${photo.filename ? `<div class="photo-filename">${escapeHtml(photo.filename)}${isLinkLost ? ' <span class="photo-link-lost">(link lost)</span>' : ''}</div>` : ''}
           <div class="photo-frame" onclick="showActionSheet(${index})">
             <span class="${labelClass}">${escapeHtml(photo.label)}</span>
             ${photo.imageBase64
               ? `<img src="${photo.imageBase64}" alt="${escapeHtml(photo.label)}">`
-              : `<div class="placeholder">
-                   <span class="placeholder-icon">[*]</span>
-                   <span>Tap to capture</span>
-                 </div>`
+              : isLinkLost
+                ? `<div class="placeholder placeholder-link-lost">
+                     <span class="placeholder-icon">[!]</span>
+                     <span>Original photo link lost</span>
+                     <span class="placeholder-sub">Tap to capture new</span>
+                   </div>`
+                : `<div class="placeholder">
+                     <span class="placeholder-icon">[*]</span>
+                     <span>Tap to capture</span>
+                   </div>`
             }
           </div>
           <div class="photo-info">
