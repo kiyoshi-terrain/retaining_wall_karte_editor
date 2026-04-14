@@ -4180,9 +4180,10 @@
         comment: entry.comment,
         filename: entry.filename || '',
         isDummy: !entry.imageBase64 && entry.comment.trim() === '', // 画像もコメントもなければダミー
-        isModified: false
+        isModified: false,
+        formatType: 'slope' // slope-karteフォーマット識別子 (保存時の画像配置ロジック分岐に使用)
       }));
-      
+
       renderPhotoGrid();
       updateStats();
       hideLoading();
@@ -4342,16 +4343,17 @@
       photoData = photoEntries.map((entry, index) => ({
         index,
         label: entry.label,
-        labelRow: entry.labelRow,
-        labelCol: entry.labelCol,
+        labelRow: entry.labelRow,    // = 画像セル行 (4, 37, 73, ...)
+        labelCol: entry.labelCol,    // = 画像セル列 (2/23/44 = B/W/AR)
         commentRow: entry.commentRow,
-        commentCol: entry.commentCol,
+        commentCol: entry.commentCol, // = 1/22/43 (A/V/AQ)
         imageBase64: entry.imageBase64,
         comment: entry.comment,
         filename: entry.filename || '',
         pathString: entry.pathString || '',
         isDummy: !entry.imageBase64 && !entry.pathString && entry.comment.trim() === '',
-        isModified: false
+        isModified: false,
+        formatType: 'retaining' // 擁壁フォーマット識別子 (保存時の画像配置ロジック分岐に使用)
       }));
 
       const withPath = photoData.filter(e => e.pathString).length;
@@ -6587,6 +6589,21 @@
       }
 
       // 画像の挿入（新規追加・変更分）
+      // ヘルパー: 指定アンカー付近の既存埋込画像をシートから除去 (retake時の重複防止)
+      //   ExcelJSの内部構造 sheet._images を直接操作。anchor.tl(row,col)が近傍なら対象とする
+      function removeImagesNear(wsheet, anchorRow1Based, anchorCol1Based, rowTol = 6, colTol = 6) {
+        if (!wsheet || !wsheet._images) return 0;
+        const anchorRow0 = anchorRow1Based - 1;
+        const anchorCol0 = anchorCol1Based - 1;
+        const before = wsheet._images.length;
+        wsheet._images = wsheet._images.filter(img => {
+          const r = img.range && img.range.tl ? img.range.tl.row : -999;
+          const c = img.range && img.range.tl ? img.range.tl.col : -999;
+          return !(Math.abs(r - anchorRow0) < rowTol && Math.abs(c - anchorCol0) < colTol);
+        });
+        return before - wsheet._images.length;
+      }
+
       for (const photo of photoData) {
         if (photo.isModified && photo.imageBase64) {
           const match = photo.imageBase64.match(/^data:image\/(\w+);base64,(.+)$/);
@@ -6595,29 +6612,43 @@
           const extension = match[1] === 'jpg' ? 'jpeg' : match[1];
           const base64Data = match[2];
 
+          // 擁壁フォーマットでは既存画像の retake が頻発するため、同位置の既存画像を先に除去
+          if (photo.formatType === 'retaining') {
+            const removed = removeImagesNear(sheet, photo.labelRow, photo.labelCol);
+            if (removed > 0) console.log(`既存画像 ${removed} 枚を除去 (retake): ${photo.label} row${photo.labelRow} col${photo.labelCol}`);
+          }
+
           const imageId = workbook.addImage({
             base64: base64Data,
             extension: extension,
           });
 
-          // ラベル行の上に画像を配置
-          // 高さは固定22.5行、幅は画像のアスペクト比に基づいて計算
-          const maxCols = 19;    // 横写真用の最大幅
-          const maxRows = 22.5;  // 固定の高さ
-          const colStart = photo.labelCol;
-          const rowEnd = photo.labelRow - 1 - 0.1;
-          const rowStart = rowEnd - maxRows;
+          // ★ フォーマット別に画像配置の座標系を計算 (Phase 1e)
+          //
+          //   slope-karteフォーマット:
+          //     - photo.labelCol = 列グループ先頭 (1/22/43)
+          //     - photo.labelRow = ラベル行 (画像はラベル行の「上」に22.5行分配置)
+          //     - maxCols = 19
+          //
+          //   retaining-wallフォーマット:
+          //     - photo.labelCol = 画像セル列 (2/23/44 = B/W/AR)、グループ先頭は -1 で求める
+          //     - photo.labelRow = 画像行そのもの (画像は「その行から下」に22行分配置)
+          //     - コメント行 = labelRow + 24 なので 22行で収まる
+          //     - maxCols = 20 (グループ21列のうち20列を画像、1列余白)
+          const isRetaining = photo.formatType === 'retaining';
+          const maxCols = isRetaining ? 20 : 19;
+          const maxRows = isRetaining ? 22 : 22.5;
+          const colStart = isRetaining ? (photo.labelCol - 1) : photo.labelCol;
+          const rowStart = isRetaining ? (photo.labelRow - 1) : (photo.labelRow - 1 - 0.1 - maxRows);
+          const rowEnd   = isRetaining ? (rowStart + maxRows) : (photo.labelRow - 1 - 0.1);
 
           let colSpan = maxCols; // デフォルトは横幅いっぱい
           if (photo.imageWidth && photo.imageHeight) {
             const aspectRatio = photo.imageWidth / photo.imageHeight;
             // 高さ基準で幅を計算（行高さ≒列幅の比率を考慮）
-            // Excelでの実測: 22.5行の高さに対して19列の幅が4:3相当
-            // → 基準アスペクト比 = 19/22.5 * (行高さ/列幅のピクセル比)
-            // 既存横写真(4:3)が19列で丁度いいので、それを基準にスケール
             const baseAspect = 4 / 3; // 横写真の基準アスペクト比
             colSpan = maxCols * (aspectRatio / baseAspect);
-            // 最大は19列（枠をはみ出さない）、最小は6列程度
+            // 最大 maxCols（枠をはみ出さない）、最小は6列程度
             colSpan = Math.min(maxCols, Math.max(6, colSpan));
           }
 
@@ -6632,7 +6663,14 @@
             editAs: 'oneCell'
           });
 
-          console.log(`画像追加: ${photo.label} (${photo.imageWidth}x${photo.imageHeight}) → row${rowStart}-${rowEnd}, col${colStartAdj.toFixed(1)}-${colEnd.toFixed(1)} (span=${colSpan.toFixed(1)})`);
+          // ★ 擁壁固有: 画像セル内のパス文字列を消去 (新規画像で置き換わったので不要)
+          if (isRetaining && photo.pathString) {
+            const imgCell = sheet.getCell(photo.labelRow, photo.labelCol);
+            imgCell.value = null;
+            console.log(`パス文字列クリア: ${photo.label} → row${photo.labelRow}, col${photo.labelCol}`);
+          }
+
+          console.log(`画像追加[${photo.formatType || 'slope'}]: ${photo.label} (${photo.imageWidth}x${photo.imageHeight}) → row${rowStart.toFixed(1)}-${rowEnd.toFixed(1)}, col${colStartAdj.toFixed(1)}-${colEnd.toFixed(1)} (span=${colSpan.toFixed(1)})`);
         }
       }
 
