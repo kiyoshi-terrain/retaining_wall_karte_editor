@@ -79,13 +79,12 @@
 
 ### ⚠️ パフォーマンス上の既知課題
 - `sheet5.xml` (Photo(2)) は **92,694 セル**、`sheet6.xml` (Photo123) は **91,287 セル** と非常に密度が高い (1449 行 × 64 列がほぼ full populated)
-- ExcelJS 4.4.0 で `wb.xlsx.load(buffer)` すると **> 3 分** かかる (Chrome上でも)。現場タブレットでは実用外
-- 対策候補:
+- **重要**: Claude Preview の iframe/eval 環境では擁壁 Excel (5.7MB) も **slope-karte Demo (4.6MB) も** 3分経っても `ExcelJS.xlsx.load()` が終わらない。slope-karte は本番で動いているため、**preview 環境固有のサンドボックス遅延**の可能性大。実ブラウザでの検証が必要
+- Phase 1g (実装済み): ロード前に `Photo\d+$` パターンのレガシーシート (Photo123) を JSZip で空 worksheet スタブに置換し、保存時に原本 XML を復元する。ロジックとしては ExcelJS のパース対象セルを半減できる見込み
+- さらなる対策候補 (実ブラウザでも遅い場合):
   - (a) JSZip + 手動 XML パースで必要シートだけ読む (selective loading)
-  - (b) Photo123 (読み取り専用シート) を無視する
   - (c) Web Worker にロードを逃がして UI ブロックを回避
   - (d) 別ライブラリ検討 (xlsx/SheetJS の方が速いケースあり)
-- 現状の Phase 1 実装はモック検証済みで**ロジックは正しい**が、実 Excel を開いた E2E テストはこの性能問題のため保留中
 
 ## フィールドで編集する3シートの実装優先度
 1. **Photo(2)** — slope-karte とほぼ同じUIで流用できる。**最初に完成**させる

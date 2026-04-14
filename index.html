@@ -1858,6 +1858,10 @@
     let savedColsByFilePath = {};  // ファイルパス(sheet1.xmlなど) → 元の<cols>XML（マッピング失敗時フォールバック用）
     let savedFmtByFilePath = {};   // ファイルパス → 元の<sheetFormatPr>（マッピング失敗時フォールバック用）
     let savedNormalFont = null;    // 原本のNormalフォント(fontId=0)XML — 列幅計算の基準
+    // ロード時に空スタブへ差し替えたレガシー/マクロ用シートの原本XMLを保持（保存時に復元）
+    // キー: "xl/worksheets/sheetN.xml" のファイルパス, 値: 原本のXML文字列
+    let stubbedLegacySheetXml = {};
+    let stubbedLegacySheetRelsXml = {};
     let fileHandle = null; // File System Access API用ハンドル
     let appPIN = null; // 認証済みPIN（メモリ上のみ、暗号化/復号に使用）
     let photoResolution = parseInt(localStorage.getItem('slopeKarteResolution')) || 1280; // 写真の解像度（長辺px）
@@ -3783,12 +3787,49 @@
         savedSheetFormatPr = {};
         savedColsByFilePath = {};
         savedFmtByFilePath = {};
+        stubbedLegacySheetXml = {};
+        stubbedLegacySheetRelsXml = {};
         let zipSheetNames = []; // ZIP内のシート名一覧（ExcelJS読み落とし検出用）
         try {
           const zip = await JSZip.loadAsync(loadBuffer);
           const { nameToFile } = await buildSheetNameMapping(zip);
           zipSheetNames = Object.keys(nameToFile);
           console.log('ZIP内シート一覧:', zipSheetNames);
+
+          // ★ 擁壁テンプレートのレガシーマクロシート対策 (Phase 1g)
+          //   Photo123 のような `Photo` + 数字だけのシートは Excel職人がマクロ用に残した
+          //   大規模 (92K セル) シートで、ユーザーは編集しない。
+          //   ExcelJS ロード前に <sheetData/> を空にして大幅に高速化し、保存時に原本を復元する。
+          const LEGACY_SHEET_RE = /^Photo\d+$/;  // 例: Photo123, Photo456 (Photo(2) は対象外)
+          const EMPTY_SHEET_STUB = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+            + ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            + '<dimension ref="A1"/><sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+            + '<sheetFormatPr defaultRowHeight="15"/><sheetData/></worksheet>';
+          const EMPTY_RELS_STUB = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>';
+          let stubbedAny = false;
+          for (const [sheetName, sheetFile] of Object.entries(nameToFile)) {
+            if (!LEGACY_SHEET_RE.test(sheetName)) continue;
+            const fullPath = 'xl/worksheets/' + sheetFile;
+            const relsPath = 'xl/worksheets/_rels/' + sheetFile + '.rels';
+            if (zip.files[fullPath]) {
+              stubbedLegacySheetXml[fullPath] = await zip.files[fullPath].async('string');
+              zip.file(fullPath, EMPTY_SHEET_STUB);
+              console.log(`[Phase 1g] stubbed legacy sheet: ${sheetName} (${fullPath}, ${stubbedLegacySheetXml[fullPath].length} bytes → ${EMPTY_SHEET_STUB.length})`);
+              stubbedAny = true;
+            }
+            if (zip.files[relsPath]) {
+              // drawings/comments への rel を切って ExcelJS の遅延パースを防ぐ
+              stubbedLegacySheetRelsXml[relsPath] = await zip.files[relsPath].async('string');
+              zip.file(relsPath, EMPTY_RELS_STUB);
+            }
+          }
+          if (stubbedAny) {
+            // ZIP を再生成して loadBuffer を差し替え
+            loadBuffer = await zip.generateAsync({ type: 'arraybuffer' });
+            console.log(`[Phase 1g] ZIP rebuilt, new size: ${loadBuffer.byteLength} bytes`);
+          }
 
           // 各シートの<cols>XMLと<sheetFormatPr>をシート名・ファイルパス両方のキーで保存
           for (const [sheetName, sheetFile] of Object.entries(nameToFile)) {
@@ -6702,6 +6743,24 @@
       // ExcelJSがデフォルト幅の列にも customWidth="1" を付けてしまう問題を修正
       // オリジナルではwidth="9"の列にcustomWidthがないため、Excelの表示列幅が変わる
       buffer = await fixExcelJSColWidths(buffer);
+
+      // ★ Phase 1g: ロード時に空スタブへ差し替えたレガシー/マクロ用シートを復元
+      //   (Photo123 等は ExcelJS が空のまま再出力してしまうので、原本XMLで上書き戻す)
+      if (Object.keys(stubbedLegacySheetXml).length > 0 || Object.keys(stubbedLegacySheetRelsXml).length > 0) {
+        try {
+          const zip = await JSZip.loadAsync(buffer);
+          for (const [path, xml] of Object.entries(stubbedLegacySheetXml)) {
+            zip.file(path, xml);
+            console.log(`[Phase 1g] restored legacy sheet: ${path} (${xml.length} bytes)`);
+          }
+          for (const [path, xml] of Object.entries(stubbedLegacySheetRelsXml)) {
+            zip.file(path, xml);
+          }
+          buffer = await zip.generateAsync({ type: 'arraybuffer' });
+        } catch (e) {
+          console.warn('[Phase 1g] legacy sheet restore failed:', e);
+        }
+      }
 
       // ZIP整合性検証・修復（ExcelJSが壊したContent_Typesやdrawing参照を修正）
       buffer = await verifyAndFixZipIntegrity(buffer);
