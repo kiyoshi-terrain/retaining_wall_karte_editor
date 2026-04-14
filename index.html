@@ -6606,13 +6606,32 @@
 
     // ヘルパー: drawing3.xml に新しい twoCellAnchor を挿入
     //   擁壁フォーマットの配置:
-    //     from: (labelCol-1, labelRow-1) 0-indexed  (画像セルの左上)
-    //     to:   (labelCol-1 + 20, labelRow-1 + 22)  (21列×22行枠にフィット)
+    //     - 列グループは 21 列幅 (labelCol-1 が左端)
+    //     - アスペクト比に応じて列スパンを調整し、グループ内で中央寄せ
+    //     - 行は labelRow-1 から下方向に 22 行分を確保 (コメント行=labelRow+24 手前)
     function buildTwoCellAnchor(photo, rId, picId) {
-      const fromCol = photo.labelCol - 1;
+      const groupCols = 21;     // 擁壁テンプレの列グループ幅
+      const maxRows = 22;
+      const baseAspect = 4 / 3; // 横写真 4:3 を基準とする
+      const groupStart = photo.labelCol - 1;
+
+      // アスペクト比から列スパンを計算 (photo.imageWidth/Height が未設定なら 4:3 想定)
+      let colSpanF = groupCols;
+      if (photo.imageWidth && photo.imageHeight) {
+        const aspect = photo.imageWidth / photo.imageHeight;
+        colSpanF = groupCols * (aspect / baseAspect);
+        // 最大グループ幅、最小 6 列にクランプ
+        colSpanF = Math.min(groupCols, Math.max(6, colSpanF));
+      }
+      // グループ内中央寄せ (float → 整数丸め: Math.round で対称性を保つ)
+      const colOffsetF = (groupCols - colSpanF) / 2;
+      const fromCol = Math.round(groupStart + colOffsetF);
+      const toCol = Math.round(groupStart + colOffsetF + colSpanF);
       const fromRow = photo.labelRow - 1;
-      const toCol = fromCol + 20;
-      const toRow = fromRow + 22;
+      const toRow = fromRow + maxRows;
+
+      console.log(`[delta-save] anchor ${photo.label}: aspect=${photo.imageWidth && photo.imageHeight ? (photo.imageWidth/photo.imageHeight).toFixed(2) : '?'} span=${(toCol-fromCol)} cols [${fromCol}..${toCol}] group[${groupStart}..${groupStart+groupCols-1}]`);
+
       return (
         `<xdr:twoCellAnchor editAs="oneCell">` +
           `<xdr:from><xdr:col>${fromCol}</xdr:col><xdr:colOff>0</xdr:colOff>` +
