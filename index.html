@@ -6845,18 +6845,16 @@
         }
       } catch (e) { console.warn('writeBufferデバッグ:', e); }
 
+      // ★ シート名↔sheetN.xml の対応を fingerprint で復元 (ExcelJS バグ対策)
+      //   ExcelJS が load→write で sheetN.xml の割り当てを内部 Map の走査順で決めるため、
+      //   workbook.xml の sheet 名 (user 視点では正しい順序) と中身がズレる。
+      //   保存直後の zip を開き、各 sheetN.xml の (cells, merged) を load 時 fingerprint と
+      //   照合して、workbook.xml.rels の Target を正しい sheetN.xml に振り直す。
+      buffer = await repairSheetNameMapping(buffer);
+
       // ExcelJSがデフォルト幅の列にも customWidth="1" を付けてしまう問題を修正
       // オリジナルではwidth="9"の列にcustomWidthがないため、Excelの表示列幅が変わる
-      // ⚠️ 注意: この中で fixZipSheetRefs が orphaned sheetN.xml を位置ベースで
-      //   sheet1-7 にリネームする処理が走る。ExcelJS が載せた content↔name の
-      //   ズレはこの位置ベースリネームではなく、後段の fingerprint 照合で直す。
       buffer = await fixExcelJSColWidths(buffer);
-
-      // ★ シート名↔sheetN.xml の対応を fingerprint で復元 (ExcelJS バグ対策)
-      //   fixZipSheetRefs は sheet file をリネームしたが content-to-name の正しさは保証しない。
-      //   load 時 fingerprint (cells/merged) と現在の sheetN.xml fingerprint を照合して
-      //   workbook.xml.rels の Target を正しい sheetN.xml に振り直す。
-      buffer = await repairSheetNameMapping(buffer);
 
       // ★ Phase 1g: ロード時に空スタブへ差し替えたレガシー/マクロ用シートを復元
       //   ⚠️ 保留中: ExcelJS がロード→保存でシートXMLファイル番号を振り直すため、
