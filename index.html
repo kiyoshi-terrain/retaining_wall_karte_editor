@@ -3878,10 +3878,17 @@
         
         renderSheetTabs();
         
-        // Photoシートを自動選択（figを含まないもの）
-        const photoSheet = workbook.worksheets.find(s => 
+        // Photoシートを自動選択
+        // - figを含まない
+        // - 擁壁テンプレートでは Photo(2) と Photo123 が両方マッチするため、
+        //   明確な "Photo(N)" 形式（括弧付き）を最優先、次に "Photo123" 等の参照シートを後回し
+        const photoCandidates = workbook.worksheets.filter(s =>
           s.name.includes('Photo') && !s.name.includes('fig')
         );
+        const photoSheet =
+          photoCandidates.find(s => /Photo\s*\(\d+\)/.test(s.name))   // "Photo(2)" 等を最優先
+          || photoCandidates.find(s => !/Photo\d/.test(s.name))        // "Photo123" のような参照シートを除外
+          || photoCandidates[0];                                       // フォールバック
         if (photoSheet) {
           selectSheet(photoSheet.name);
         } else if (workbook.worksheets.length > 0) {
