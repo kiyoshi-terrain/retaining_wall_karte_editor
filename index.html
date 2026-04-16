@@ -6610,27 +6610,35 @@
     //     - アスペクト比に応じて列スパンを調整し、グループ内で中央寄せ
     //     - 行は labelRow-1 から下方向に 22 行分を確保 (コメント行=labelRow+24 手前)
     function buildTwoCellAnchor(photo, rId, picId) {
-      const groupCols = 21;     // 擁壁テンプレの列グループ幅
+      // テンプレの既存 anchor パターンを踏襲:
+      //   横写真 (4:3) はグループ先頭+1 から +19 あたりまで 18 列幅で配置、
+      //   グループ先頭 1 列と末尾 2 列を視覚的な余白として残す。
+      //   縦写真/ほぼ正方形はその 18 列内でアスペクト比を保ちつつ中央寄せ。
+      const imageRegion = 18;       // テンプレ標準の画像幅 (landscape 4:3 想定)
+      const leftMargin = 1;         // グループ先頭から何列空けるか (テンプレ踏襲)
       const maxRows = 22;
-      const baseAspect = 4 / 3; // 横写真 4:3 を基準とする
-      const groupStart = photo.labelCol - 1;
+      const baseAspect = 4 / 3;
+      const groupStart = photo.labelCol - 1; // 画像セル列 (0-indexed, B/W/AR)
+      // 画像セル列は実はグループ先頭+1 なので、groupStart は既に leftMargin 分加味済み
+      // → fromColBase = groupStart で 18 列を展開する
 
-      // アスペクト比から列スパンを計算 (photo.imageWidth/Height が未設定なら 4:3 想定)
-      let colSpanF = groupCols;
+      let colSpanF = imageRegion;
       if (photo.imageWidth && photo.imageHeight) {
         const aspect = photo.imageWidth / photo.imageHeight;
-        colSpanF = groupCols * (aspect / baseAspect);
-        // 最大グループ幅、最小 6 列にクランプ
-        colSpanF = Math.min(groupCols, Math.max(6, colSpanF));
+        colSpanF = imageRegion * (aspect / baseAspect);
+        // 下限 6 列・上限 imageRegion 列にクランプ
+        colSpanF = Math.min(imageRegion, Math.max(6, colSpanF));
       }
-      // グループ内中央寄せ (float → 整数丸め: Math.round で対称性を保つ)
-      const colOffsetF = (groupCols - colSpanF) / 2;
+      // imageRegion 内で中央寄せ
+      const colOffsetF = (imageRegion - colSpanF) / 2;
       const fromCol = Math.round(groupStart + colOffsetF);
       const toCol = Math.round(groupStart + colOffsetF + colSpanF);
       const fromRow = photo.labelRow - 1;
       const toRow = fromRow + maxRows;
 
-      console.log(`[delta-save] anchor ${photo.label}: aspect=${photo.imageWidth && photo.imageHeight ? (photo.imageWidth/photo.imageHeight).toFixed(2) : '?'} span=${(toCol-fromCol)} cols [${fromCol}..${toCol}] group[${groupStart}..${groupStart+groupCols-1}]`);
+      const aspectStr = photo.imageWidth && photo.imageHeight
+        ? (photo.imageWidth/photo.imageHeight).toFixed(2) : '?';
+      console.log(`[delta-save] anchor ${photo.label}: ${photo.imageWidth}x${photo.imageHeight} aspect=${aspectStr} span=${(toCol-fromCol)} [${fromCol}..${toCol}] (imageCell=${groupStart})`);
 
       return (
         `<xdr:twoCellAnchor editAs="oneCell">` +
@@ -6749,6 +6757,26 @@
           const ext = match[1] === 'jpg' ? 'jpeg' : match[1];
           const base64 = match[2];
           const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+
+          // アスペクト比が保存時に未設定なら base64 からデコードして取得
+          //   (画像キャプチャ経路で imageWidth/Height を set 漏れしても安全になるように)
+          if (!photo.imageWidth || !photo.imageHeight) {
+            try {
+              const img = new Image();
+              await new Promise((resolve, reject) => {
+                img.onload = resolve;
+                img.onerror = reject;
+                img.src = photo.imageBase64;
+              });
+              photo.imageWidth = img.naturalWidth;
+              photo.imageHeight = img.naturalHeight;
+              console.log(`[delta-save] 画像寸法を推定: ${photo.label} = ${photo.imageWidth}x${photo.imageHeight}`);
+            } catch (err) {
+              console.warn(`[delta-save] 画像寸法推定失敗: ${photo.label}`, err);
+            }
+          } else {
+            console.log(`[delta-save] 画像寸法 (既設定): ${photo.label} = ${photo.imageWidth}x${photo.imageHeight}`);
+          }
 
           // 1. media 追加
           const mediaName = nextMediaName(zip, ext);
