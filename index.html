@@ -6610,58 +6610,71 @@
     //     - アスペクト比に応じて列スパンを調整し、グループ内で中央寄せ
     //     - 行は labelRow-1 から下方向に 22 行分を確保 (コメント行=labelRow+24 手前)
     function buildImageAnchor(photo, rId, picId) {
-      // テンプレと同じ twoCellAnchor + 固定枠を使う。
-      //   from/to = 固定枠 (テンプレの既存画像と同じ列グループ別の座標)
-      //   a:xfrm/a:ext = 実際の画像物理サイズ (アスペクト比保持で枠内フィット)
-      //   a:xfrm/a:off = 枠内中央寄せのオフセット
-      //
-      // テンプレ実測 (左グループ row=3 の画像):
-      //   from col=1 colOff=0 → to col=19 colOff=242470, row+23 rowOff=3536
-      //   a:off x=285750 y=762000, a:ext cx=5385970 cy=4385036
-      //   → 枠の物理サイズ ≈ 5714470 (cx) × 4385036 (cy) EMU
+      // twoCellAnchor の from/to 自体を画像アスペクト比に合わせる。
+      // a:xfrm に頼らない — Excel バージョンによっては無視される。
+      // 画像をテンプレ枠 (18cols×23rows) 内にフィットさせ、中央寄せ。
+      const ROW_EMU = 190500;
+      const COL_EMU = 304000;
 
-      // 列グループ別の固定枠パターン (テンプレ実測)
+      // テンプレ枠の物理サイズ (列グループ別)
       const ANCHOR = {
         2:  { fc:1,  fco:0,      tc:19, tco:242470, rs:23, tro:3536  },
         23: { fc:22, fco:0,      tc:40, tco:242471, rs:22, tro:48919 },
         44: { fc:42, fco:242536, tc:61, tco:238477, rs:21, tro:46271 },
       };
-      const a = ANCHOR[photo.labelCol] || ANCHOR[2]; // fallback to left group
+      const a = ANCHOR[photo.labelCol] || ANCHOR[2];
+      const BOX_CX = (a.tc - a.fc) * COL_EMU + a.tco - a.fco;
+      const BOX_CY = a.rs * ROW_EMU + a.tro;
+      const baseFromRow = photo.labelRow - 1; // 0-indexed
 
-      const fromRow = photo.labelRow - 1; // 0-indexed
-      const toRow = fromRow + a.rs;
-
-      // 枠の物理サイズ (EMU)
-      const COL_EMU = 304000;
-      const BOX_CX = (a.tc - a.fc) * COL_EMU + a.tco - a.fco; // ≈ 5714470
-      const BOX_CY = a.rs * 190500 + a.tro;                     // ≈ 4385036
-
-      // 画像の物理サイズ (枠内フィット、アスペクト比保持)
-      let cx, cy;
+      // 画像アスペクト比でフィットサイズを計算
+      let imgCX = BOX_CX, imgCY = BOX_CY;
       if (photo.imageWidth && photo.imageHeight) {
         const imgAspect = photo.imageWidth / photo.imageHeight;
         const boxAspect = BOX_CX / BOX_CY;
         if (imgAspect >= boxAspect) {
-          cx = BOX_CX; cy = Math.round(BOX_CX / imgAspect);
+          imgCX = BOX_CX;
+          imgCY = Math.round(BOX_CX / imgAspect);
         } else {
-          cy = BOX_CY; cx = Math.round(BOX_CY * imgAspect);
+          imgCY = BOX_CY;
+          imgCX = Math.round(BOX_CY * imgAspect);
         }
-      } else {
-        cx = BOX_CX; cy = BOX_CY;
       }
 
-      // 枠内中央寄せ
-      const offX = Math.round((BOX_CX - cx) / 2);
-      const offY = Math.round((BOX_CY - cy) / 2);
+      // from/to を imgCX × imgCY に合わせる (中央寄せ)
+      const gapX = BOX_CX - imgCX;
+      const gapY = BOX_CY - imgCY;
+      const offsetX = Math.round(gapX / 2); // 水平中央寄せの EMU オフセット
+      const offsetY = Math.round(gapY / 2); // 垂直中央寄せの EMU オフセット
 
-      console.log(`[delta-save] anchor ${photo.label}: ${photo.imageWidth||'?'}x${photo.imageHeight||'?'} img=${cx}x${cy} box=${BOX_CX}x${BOX_CY} off=${offX},${offY}`);
+      // from col/colOff: テンプレ枠左端 + offsetX
+      const fromColOffTotal = a.fco + offsetX;
+      const fromCol = a.fc + Math.floor(fromColOffTotal / COL_EMU);
+      const fromColOff = fromColOffTotal % COL_EMU;
+
+      // from row/rowOff: 基本行 + offsetY
+      const fromRowOffTotal = offsetY;
+      const fromRow = baseFromRow + Math.floor(fromRowOffTotal / ROW_EMU);
+      const fromRowOff = fromRowOffTotal % ROW_EMU;
+
+      // to col/colOff: from + imgCX
+      const toColOffTotal = fromColOff + imgCX;
+      const toCol = fromCol + Math.floor(toColOffTotal / COL_EMU);
+      const toColOff = toColOffTotal % COL_EMU;
+
+      // to row/rowOff: from + imgCY
+      const toRowOffTotal = fromRowOff + imgCY;
+      const toRow = fromRow + Math.floor(toRowOffTotal / ROW_EMU);
+      const toRowOff = toRowOffTotal % ROW_EMU;
+
+      console.log(`[delta-save] anchor ${photo.label}: ${photo.imageWidth||'?'}x${photo.imageHeight||'?'} img=${imgCX}x${imgCY} box=${BOX_CX}x${BOX_CY} from(c${fromCol}+${fromColOff},r${fromRow}+${fromRowOff}) to(c${toCol}+${toColOff},r${toRow}+${toRowOff})`);
 
       return (
         `<xdr:twoCellAnchor>` +
-          `<xdr:from><xdr:col>${a.fc}</xdr:col><xdr:colOff>${a.fco}</xdr:colOff>` +
-                    `<xdr:row>${fromRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>` +
-          `<xdr:to><xdr:col>${a.tc}</xdr:col><xdr:colOff>${a.tco}</xdr:colOff>` +
-                  `<xdr:row>${toRow}</xdr:row><xdr:rowOff>${a.tro}</xdr:rowOff></xdr:to>` +
+          `<xdr:from><xdr:col>${fromCol}</xdr:col><xdr:colOff>${fromColOff}</xdr:colOff>` +
+                    `<xdr:row>${fromRow}</xdr:row><xdr:rowOff>${fromRowOff}</xdr:rowOff></xdr:from>` +
+          `<xdr:to><xdr:col>${toCol}</xdr:col><xdr:colOff>${toColOff}</xdr:colOff>` +
+                  `<xdr:row>${toRow}</xdr:row><xdr:rowOff>${toRowOff}</xdr:rowOff></xdr:to>` +
           `<xdr:pic>` +
             `<xdr:nvPicPr>` +
               `<xdr:cNvPr id="${picId}" name="Picture ${picId}" descr="${escapeXml(photo.filename || photo.label)}"/>` +
@@ -6672,7 +6685,7 @@
               `<a:stretch><a:fillRect/></a:stretch>` +
             `</xdr:blipFill>` +
             `<xdr:spPr>` +
-              `<a:xfrm><a:off x="${offX}" y="${offY}"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
+              `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${imgCX}" cy="${imgCY}"/></a:xfrm>` +
               `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
             `</xdr:spPr>` +
           `</xdr:pic>` +
