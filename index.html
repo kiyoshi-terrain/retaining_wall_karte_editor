@@ -7192,9 +7192,13 @@
           nextPicId++;
           drawingXml = drawingXml.replace(/<\/xdr:wsDr>/, `${anchorXml}</xdr:wsDr>`);
 
-          // 5. 画像セル(labelRow,labelCol)のパス文字列をクリア（DOM操作）
+          // 5. 画像セル(labelRow,labelCol)にファイル名を書き込む（旧パス文字列を置換）
           const imgCellRef = colNumToLetter(photo.labelCol) + photo.labelRow;
-          clearCellValueDOM(sheetDoc, imgCellRef);
+          if (photo.filename) {
+            writeInlineStringCellDOM(sheetDoc, imgCellRef, photo.filename);
+          } else {
+            clearCellValueDOM(sheetDoc, imgCellRef);
+          }
 
           console.log(`[delta-save] 画像追加: ${photo.label} → media/${mediaName} anchor=${newRId} picId=${nextPicId - 1}`);
         }
