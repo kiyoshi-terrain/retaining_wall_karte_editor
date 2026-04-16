@@ -6942,10 +6942,12 @@
       console.log(`[delta-save] Photo(2) sheet=${sheetPath}, drawing=${drawingPath}`);
 
       const modifiedPhotos = photoData.filter(p => p.isModified);
-      console.log(`[delta-save] modified photos: ${modifiedPhotos.length}`);
+      const modifiedAnnotations = Object.entries(annotationData || {})
+        .filter(([k, v]) => v && v.isModified && v.drawingDataUrl);
+      console.log(`[delta-save] modified photos: ${modifiedPhotos.length}, annotations: ${modifiedAnnotations.length}`);
 
       // 変更なし: 原本 zip をそのまま使う (ただし PIN があれば暗号化は必要なので下の共通処理に流す)
-      const noChanges = modifiedPhotos.length === 0;
+      const noChanges = modifiedPhotos.length === 0 && modifiedAnnotations.length === 0;
 
       // 変更がある場合のみ XML ロード (変更なしでは zip にも触らず原本バイトそのまま)
       let sheetXml, drawingXml, drawingRelsXml, ctXml;
@@ -7039,13 +7041,126 @@
         }
       }
 
+      // ★ 手書きメモ (fig シートのアノテーション) を delta で保存
+      //   各シートの drawing XML に透過 PNG を追加。
+      //   前回の手書き画像 (name="Annotation_*") は削除してから追加 → レイヤ蓄積防止。
+      for (const [sheetName, ad] of modifiedAnnotations) {
+        // ページ分割の場合は各ページの手書きを処理
+        const pagesToSave = ad.pages ?
+          Object.entries(ad.pageDrawings || {}).filter(([_, url]) => url).map(([idx, url]) => ({ pageIdx: parseInt(idx), drawingDataUrl: url }))
+          : (ad.drawingDataUrl ? [{ pageIdx: -1, drawingDataUrl: ad.drawingDataUrl }] : []);
+        // 現在ページの未退避データも含める
+        if (ad.drawingDataUrl && ad.pages && !ad.pageDrawings?.[ad.currentPage]) {
+          pagesToSave.push({ pageIdx: ad.currentPage, drawingDataUrl: ad.drawingDataUrl });
+        }
+
+        if (pagesToSave.length === 0) continue;
+
+        // シートの drawing パスを解決
+        const wbXml2 = await zip.files['xl/workbook.xml'].async('string');
+        const sheetMatch2 = wbXml2.match(new RegExp(`<sheet[^>]*name="${sheetName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[^>]*r:id="(rId\\d+)"`));
+        if (!sheetMatch2) { console.warn(`[delta-save] 手書き: ${sheetName} 未発見`); continue; }
+        const rId2 = sheetMatch2[1];
+        const wbRelsXml2 = await zip.files['xl/_rels/workbook.xml.rels'].async('string');
+        const relMatch2 = wbRelsXml2.match(new RegExp(`<Relationship[^>]*Id="${rId2}"[^>]*Target="([^"]+)"`));
+        if (!relMatch2) continue;
+        const figSheetFile = 'xl/' + relMatch2[1].replace(/^\/?/, '').replace(/^xl\//, '');
+        const figSheetName = figSheetFile.split('/').pop();
+        const figSheetRelsPath = `xl/worksheets/_rels/${figSheetName}.rels`;
+
+        // sheet rels → drawing パス
+        let figDrawingPath = null;
+        if (zip.files[figSheetRelsPath]) {
+          const srXml = await zip.files[figSheetRelsPath].async('string');
+          const dMatch = srXml.match(/<Relationship[^>]*Target="([^"]*drawings\/[^"]+)"/);
+          if (dMatch) figDrawingPath = dMatch[1].replace('../', 'xl/');
+        }
+        if (!figDrawingPath || !zip.files[figDrawingPath]) {
+          console.warn(`[delta-save] 手書き: ${sheetName} に drawing がない`);
+          continue;
+        }
+
+        let figDrawXml = await zip.files[figDrawingPath].async('string');
+        const figDrawRelsPath = figDrawingPath.replace('drawings/', 'drawings/_rels/') + '.rels';
+        let figDrawRelsXml = zip.files[figDrawRelsPath]
+          ? await zip.files[figDrawRelsPath].async('string') : null;
+
+        // 前回の手書きアンカーを削除 (name="Annotation_*" で識別)
+        figDrawXml = figDrawXml.replace(/<xdr:twoCellAnchor>[^]*?name="Annotation_[^"]*"[^]*?<\/xdr:twoCellAnchor>/g, '');
+
+        for (const { pageIdx, drawingDataUrl } of pagesToSave) {
+          const match = drawingDataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+          if (!match) continue;
+          const ext = match[1] === 'jpg' ? 'jpeg' : match[1];
+          const bytes = Uint8Array.from(atob(match[2]), c => c.charCodeAt(0));
+
+          // media 追加
+          const mediaName = nextMediaName(zip, ext);
+          zip.file(`xl/media/${mediaName}`, bytes);
+
+          // Content_Types ensure
+          if (!ctXml) ctXml = await zip.files['[Content_Types].xml'].async('string');
+          const mime = ext === 'png' ? 'image/png' : `image/${ext}`;
+          if (!new RegExp(`<Default[^>]*Extension="${ext}"`).test(ctXml)) {
+            ctXml = ctXml.replace('</Types>', `<Default Extension="${ext}" ContentType="${mime}"/></Types>`);
+          }
+
+          // drawing rels 追加
+          if (!figDrawRelsXml) {
+            figDrawRelsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>';
+          }
+          const newRId = nextDrawingRId(figDrawRelsXml);
+          figDrawRelsXml = figDrawRelsXml.replace('</Relationships>',
+            `<Relationship Id="${newRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${mediaName}"/></Relationships>`);
+
+          // 配置座標: 該当ページの元画像と同じ位置に重ねる
+          const origImg = ad.pages ? ad.pages[pageIdx] : (ad.originalImages?.[0] || null);
+          const range = origImg?.range;
+          const tlR = range?.tl?.nativeRow ?? range?.tl?.row ?? 0;
+          const tlC = range?.tl?.nativeCol ?? range?.tl?.col ?? 0;
+          const brR = range?.br?.nativeRow ?? range?.br?.row ?? (tlR + 30);
+          const brC = range?.br?.nativeCol ?? range?.br?.col ?? (tlC + 20);
+
+          const anchorName = `Annotation_${sheetName}_p${pageIdx}`;
+          const anchorXml =
+            `<xdr:twoCellAnchor>` +
+              `<xdr:from><xdr:col>${Math.floor(tlC)}</xdr:col><xdr:colOff>0</xdr:colOff>` +
+                        `<xdr:row>${Math.floor(tlR)}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>` +
+              `<xdr:to><xdr:col>${Math.floor(brC)}</xdr:col><xdr:colOff>0</xdr:colOff>` +
+                      `<xdr:row>${Math.floor(brR)}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>` +
+              `<xdr:pic>` +
+                `<xdr:nvPicPr>` +
+                  `<xdr:cNvPr id="${nextPicId}" name="${anchorName}"/>` +
+                  `<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr>` +
+                `</xdr:nvPicPr>` +
+                `<xdr:blipFill>` +
+                  `<a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${newRId}"/>` +
+                  `<a:stretch><a:fillRect/></a:stretch>` +
+                `</xdr:blipFill>` +
+                `<xdr:spPr>` +
+                  `<a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>` +
+                  `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+                `</xdr:spPr>` +
+              `</xdr:pic>` +
+              `<xdr:clientData/>` +
+            `</xdr:twoCellAnchor>`;
+          nextPicId++;
+          figDrawXml = figDrawXml.replace(/<\/xdr:wsDr>/, `${anchorXml}</xdr:wsDr>`);
+
+          console.log(`[delta-save] 手書きメモ: ${sheetName} page=${pageIdx} → media/${mediaName} anchor=${anchorName}`);
+        }
+
+        zip.file(figDrawingPath, figDrawXml);
+        if (figDrawRelsXml && figDrawRelsPath) zip.file(figDrawRelsPath, figDrawRelsXml);
+      }
+
       // 書き戻し (変更があった場合のみ)
       let buffer;
       if (!noChanges) {
-        zip.file(sheetPath, sheetXml);
+        if (sheetXml) zip.file(sheetPath, sheetXml);
         if (drawingXml && drawingPath) zip.file(drawingPath, drawingXml);
         if (drawingRelsXml && drawingRelsPath) zip.file(drawingRelsPath, drawingRelsXml);
-        zip.file('[Content_Types].xml', ctXml);
+        if (ctXml) zip.file('[Content_Types].xml', ctXml);
         buffer = await zip.generateAsync({
           type: 'arraybuffer',
           compression: 'DEFLATE',
@@ -7089,8 +7204,9 @@
       //   photoData の formatType を見て判定。mixed sheet (figシート編集等) がある場合は
       //   既存パイプラインを使う必要があるが、Phase 1 MVP では Photo(2) のみ想定。
       const isRetaining = photoData.length > 0 && photoData[0].formatType === 'retaining';
-      const hasFigEdits = Object.values(annotationData || {}).some(a => a && a.isModified);
-      if (isRetaining && !hasFigEdits) {
+      if (isRetaining) {
+        // ★ 擁壁フォーマットは常に delta 保存 (手書きメモ含む)
+        //   ExcelJS writeBuffer 経路はシート mapping を破壊するため使わない
         console.log('[prepareAndBuildBlob] 擁壁 delta 保存経路を使用');
         return await buildSaveBlobRetainingWall();
       }
