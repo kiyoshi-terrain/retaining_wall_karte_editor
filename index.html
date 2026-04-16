@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Retaining Wall Karte">
-  <meta name="theme-color" content="#000000">
+  <meta name="theme-color" content="#1a1a2e">
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'self' capacitor: https:;
     script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://accounts.google.com capacitor:;
@@ -2340,6 +2340,15 @@
 
     // GISライブラリ読み込み完了時に初期化
     window.addEventListener('load', () => setTimeout(initGoogleDrive, 500));
+
+    // Service Worker 登録（オフライン対応 + PWAインストール）
+    window.addEventListener('load', () => {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('./service-worker.js')
+          .then(reg => console.log('[SW] registered:', reg.scope))
+          .catch(err => console.warn('[SW] registration failed:', err));
+      }
+    });
 
     // IDBエビクション防止: ブラウザにデータの永続化を要請
     window.addEventListener('load', async () => {
