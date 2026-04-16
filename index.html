@@ -2137,14 +2137,6 @@
     // ============================
     // セキュリティユーティリティ
     // ============================
-    // HTMLエスケープ（XSS防止）
-    function escapeHtml(str) {
-      if (str == null) return '';
-      const div = document.createElement('div');
-      div.textContent = String(str);
-      return div.innerHTML;
-    }
-
     // 機密データクリア（ファイルクローズ時・バックグラウンド移行時）
     function clearSensitiveData() {
       workbook = null;
