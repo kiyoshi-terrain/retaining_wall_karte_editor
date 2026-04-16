@@ -4759,10 +4759,22 @@
         const imgW = img.naturalWidth;
         const imgH = img.naturalHeight;
 
-        bgCanvas.width = imgW;
-        bgCanvas.height = imgH;
-        drawingCanvas.width = imgW;
-        drawingCanvas.height = imgH;
+        // ★ DPR 対応: Retina iPad (2x/3x) でシャープな描画のため
+        //   canvas の物理ピクセルを DPR 倍にし、ctx.scale で座標系は元のまま維持。
+        //   screenToCanvas() は CSS transform ベースなので変更不要。
+        const dpr = window.devicePixelRatio || 1;
+
+        bgCanvas.width = imgW * dpr;
+        bgCanvas.height = imgH * dpr;
+        bgCanvas.style.width = imgW + 'px';
+        bgCanvas.style.height = imgH + 'px';
+        bgCtx.scale(dpr, dpr);
+
+        drawingCanvas.width = imgW * dpr;
+        drawingCanvas.height = imgH * dpr;
+        drawingCanvas.style.width = imgW + 'px';
+        drawingCanvas.style.height = imgH + 'px';
+        drawingCtx.scale(dpr, dpr);
 
         bgCtx.drawImage(img, 0, 0, imgW, imgH);
 
@@ -4913,6 +4925,7 @@
 
     let pinchState = null;
     let touchDrawingId = null;  // 1本指タッチ描画中のpointerId
+    let touchPanState = null;   // 1本指タッチパン状態 { startX, startY, startTx, startTy, pointerId }
 
     // --- 選択モード用状態 ---
     let selectDragStart = null;  // { canvasX, canvasY } ドラッグ開始位置
@@ -4947,7 +4960,9 @@
           };
           return;
         }
-        // 1本指タッチ
+        // ★ パームリジェクション: 1本指タッチは描画せず、パン操作に割り当て
+        //   Apple Pencil (pointerType='pen') でのみ描画。指タッチは移動専用。
+        //   テキスト/付箋/選択はタッチでも操作可能 (配置操作なので)
         const pos = screenToCanvas(e.clientX, e.clientY);
         if (drawingTool === 'text') {
           showTextInput(pos.x, pos.y);
@@ -4961,10 +4976,14 @@
           handleSelectDown(pos, e);
           return;
         }
-        // ペン/消しゴム → activeStroke作成
-        startStroke(pos, e);
-        isDrawing = true;
-        touchDrawingId = e.pointerId;
+        // 1本指タッチ → パン操作 (描画しない)
+        touchPanState = {
+          startX: e.clientX,
+          startY: e.clientY,
+          startTx: drawingTransform.x,
+          startTy: drawingTransform.y,
+          pointerId: e.pointerId,
+        };
         drawingCanvas.setPointerCapture(e.pointerId);
         return;
       }
@@ -5138,6 +5157,11 @@
             drawingTransform.x = anchorScreenX - canvasX * newScale + panDx;
             drawingTransform.y = anchorScreenY - canvasY * newScale + panDy;
             applyCanvasTransform();
+          } else if (activePointers.size === 1 && touchPanState && e.pointerId === touchPanState.pointerId) {
+            // ★ 1本指タッチ → パン操作 (パームリジェクション: 描画しない)
+            drawingTransform.x = touchPanState.startTx + (e.clientX - touchPanState.startX);
+            drawingTransform.y = touchPanState.startTy + (e.clientY - touchPanState.startY);
+            applyCanvasTransform();
           } else if (activePointers.size === 1 && isDrawing && e.pointerId === touchDrawingId) {
             const pos = screenToCanvas(e.clientX, e.clientY);
             if (drawingTool === 'select') {
@@ -5210,6 +5234,29 @@
         if (activeStroke.type === 'pen') {
           renderActiveStrokeIncremental(prevLen);
         }
+
+        // ★ 予測イベント: Apple Pencil の予測ポイントで先行描画 (体感遅延低減)
+        if (e.getPredictedEvents && activeStroke && activeStroke.type === 'pen') {
+          const predicted = e.getPredictedEvents();
+          if (predicted.length > 0) {
+            drawingCtx.save();
+            drawingCtx.globalAlpha = 0.4;
+            drawingCtx.strokeStyle = activeStroke.color;
+            drawingCtx.lineWidth = activeStroke.lineWidth;
+            drawingCtx.lineCap = 'round';
+            drawingCtx.lineJoin = 'round';
+            const lastPt = activeStroke.points[activeStroke.points.length - 1];
+            drawingCtx.beginPath();
+            drawingCtx.moveTo(lastPt.x, lastPt.y);
+            for (const pe of predicted) {
+              const pp = screenToCanvas(pe.clientX, pe.clientY);
+              drawingCtx.lineTo(pp.x, pp.y);
+            }
+            drawingCtx.stroke();
+            drawingCtx.restore();
+          }
+        }
+
         scheduleRender();
       }
     }
@@ -5286,6 +5333,10 @@
       }
 
       if (e.pointerType === 'touch') {
+        // パン操作の終了
+        if (touchPanState && e.pointerId === touchPanState.pointerId) {
+          touchPanState = null;
+        }
         if (isDrawing && e.pointerId === touchDrawingId) {
           isDrawing = false;
           touchDrawingId = null;
@@ -5451,13 +5502,23 @@
 
     function renderDrawingObjects() {
       if (!drawingCtx || !drawingCanvas) return;
-      const w = drawingCanvas.width;
-      const h = drawingCanvas.height;
-      drawingCtx.clearRect(0, 0, w, h);
+      const dpr = window.devicePixelRatio || 1;
+      const w = drawingCanvas.width / dpr;
+      const h = drawingCanvas.height / dpr;
+      // ★ DPR 対応: save/restore で scale(dpr) を維持しつつ clearRect は論理座標
+      drawingCtx.save();
+      drawingCtx.setTransform(1, 0, 0, 1, 0, 0);
+      drawingCtx.clearRect(0, 0, drawingCanvas.width, drawingCanvas.height);
+      drawingCtx.restore();
 
-      // 1. キャッシュ描画
+      // 1. キャッシュ描画 (キャッシュも DPR 倍なので論理座標で描画)
       if (!cacheValid) rebuildCache();
-      if (cacheCanvas) drawingCtx.drawImage(cacheCanvas, 0, 0);
+      if (cacheCanvas) {
+        drawingCtx.save();
+        drawingCtx.setTransform(1, 0, 0, 1, 0, 0);
+        drawingCtx.drawImage(cacheCanvas, 0, 0);
+        drawingCtx.restore();
+      }
 
       // 2. アクティブストローク描画
       if (activeStroke) renderSingleObject(drawingCtx, activeStroke);
@@ -5471,10 +5532,12 @@
 
     function rebuildCache() {
       if (!cacheCanvas) cacheCanvas = document.createElement('canvas');
-      cacheCanvas.width = drawingCanvas.width;
+      const dpr = window.devicePixelRatio || 1;
+      cacheCanvas.width = drawingCanvas.width;   // 既に DPR 倍
       cacheCanvas.height = drawingCanvas.height;
       cacheCtx = cacheCanvas.getContext('2d');
-      cacheCtx.clearRect(0, 0, cacheCanvas.width, cacheCanvas.height);
+      cacheCtx.scale(dpr, dpr);  // ★ DPR 対応: 座標系は元サイズのまま
+      cacheCtx.clearRect(0, 0, cacheCanvas.width / dpr, cacheCanvas.height / dpr);
 
       const sorted = [...drawObjects].sort((a, b) => a.zOrder - b.zOrder);
       for (const obj of sorted) {
