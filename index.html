@@ -4894,38 +4894,6 @@
       });
 
       if (!annotationData[sheetName]) {
-        if (figImages.length > 1 && !areImagesSpatiallyGrouped(figImages)) {
-          // 画像が空間的に分離 → 個別表示モード
-          // row順にソート
-          figImages.sort((a, b) => {
-            const aRow = a.range.tl.nativeRow ?? a.range.tl.row ?? 0;
-            const bRow = b.range.tl.nativeRow ?? b.range.tl.row ?? 0;
-            return aRow - bRow;
-          });
-          annotationData[sheetName] = {
-            backgroundDataUrl: null,
-            drawingDataUrl: null,
-            compositeDataUrl: null,
-            isModified: false,
-            originalImages: figImages,
-            showIndividual: true,
-          };
-          // 各画像ごとのannotationエントリを作成
-          figImages.forEach((img, i) => {
-            const key = sheetName + '::fig' + i;
-            if (!annotationData[key]) {
-              annotationData[key] = {
-                backgroundDataUrl: img.dataUrl,
-                drawingDataUrl: null,
-                compositeDataUrl: null,
-                isModified: false,
-                originalImages: [img],
-              };
-            }
-          });
-          renderFigSheetUI(sheet, sheetName);
-          return;
-        }
         if (figImages.length > 1) {
           // 損傷図(2) のような縦に並ぶ独立ページ図面か、
           // fig Photo のような背景+マーカー重ねかを判定
