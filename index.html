@@ -1723,6 +1723,11 @@
       <span class="menu-label">Save As</span>
       <span class="menu-hint">Choose location</span>
     </button>
+    <button class="menu-sheet-btn" onclick="closeMenuSheet(); downloadAllPhotosAsZip();">
+      <span class="menu-icon">[IMG]</span>
+      <span class="menu-label">Photos ZIP</span>
+      <span class="menu-hint">Download all photos as backup</span>
+    </button>
     <button class="menu-sheet-btn" onclick="closeMenuSheet(); window.open('batch-compress.html','_blank');">
       <span class="menu-icon">[Z]</span>
       <span class="menu-label">Compress</span>
@@ -2082,6 +2087,8 @@
         const pending = photos.filter(p => p.driveUploadPending && p.rawBlob);
         if (pending.length === 0) { driveRetryRunning = false; return; }
         console.log(`[driveRetry] ${pending.length} photos pending upload`);
+        let successCount = 0;
+        let failCount = 0;
         for (const p of pending) {
           try {
             await ensureGdriveToken();
@@ -2090,10 +2097,26 @@
             await uploadRawPhotoToDriveBlob(p.rawBlob, filename);
             await idbMarkPhotoUploaded(label);
             console.log(`[driveRetry] uploaded: ${filename}`);
+            successCount++;
           } catch (err) {
-            console.warn('[driveRetry] still failing:', err);
-            break;
+            console.warn('[driveRetry] failed:', err);
+            failCount++;
+            // 認証エラーは即中断（トークン失効の可能性）
+            if (err && err.message && /auth|401|token/i.test(err.message)) {
+              console.warn('[driveRetry] auth error, aborting queue');
+              break;
+            }
+            // 連続3件失敗したら中断（ネットワーク障害）
+            if (failCount >= 3) {
+              console.warn('[driveRetry] too many failures, aborting queue');
+              break;
+            }
+            // それ以外は次の写真へ（個別エラー）
+            continue;
           }
+        }
+        if (successCount > 0) {
+          setStatus(`${successCount} photos uploaded to Drive`, '');
         }
       } catch (err) {
         console.warn('[driveRetry] queue drain error:', err);
@@ -2276,6 +2299,36 @@
 
     // GISライブラリ読み込み完了時に初期化
     window.addEventListener('load', () => setTimeout(initGoogleDrive, 500));
+
+    // IDBエビクション防止: ブラウザにデータの永続化を要請
+    window.addEventListener('load', async () => {
+      try {
+        if (navigator.storage && navigator.storage.persist) {
+          const already = await navigator.storage.persisted();
+          if (!already) {
+            const granted = await navigator.storage.persist();
+            console.log(`[storage.persist] granted=${granted}`);
+          } else {
+            console.log('[storage.persist] already persisted');
+          }
+        }
+      } catch (err) {
+        console.warn('[storage.persist] failed:', err);
+      }
+    });
+
+    // ネットワーク復帰時にGDriveリトライキューをドレイン
+    window.addEventListener('online', () => {
+      console.log('[network] online event → drain GDrive retry queue');
+      if (gdriveAccessToken) drainDriveRetryQueue();
+    });
+
+    // 定期リトライ（30秒ごと、オンライン時のみ）
+    setInterval(() => {
+      if (navigator.onLine && gdriveAccessToken) {
+        drainDriveRetryQueue();
+      }
+    }, 30000);
 
     async function ensureGdriveToken() {
       if (gdriveAccessToken && Date.now() < gdriveTokenExpiry - 60000) {
@@ -3061,8 +3114,25 @@
       photoData[currentPhotoIndex].filename = displayFilename;
       hasUnsavedChanges = true;
 
-      // IDBに写真を即時保存
-      idbSavePhoto(label, dataUrl, null, displayFilename);
+      // dataUrl → Blob 変換 (GDriveリトライ対象にするため)
+      let rawBlob = null;
+      try {
+        const resp = await fetch(dataUrl);
+        rawBlob = await resp.blob();
+      } catch (err) {
+        console.warn('dataUrl→Blob変換失敗:', err);
+      }
+
+      // IDBに写真を即時保存（rawBlobも一緒に保存してGDriveリトライ可能にする）
+      idbSavePhoto(label, dataUrl, rawBlob, displayFilename);
+
+      // GDriveへ直接アップロード（ベストエフォート）
+      if (gdriveAccessToken && rawBlob) {
+        uploadRawPhotoToDriveBlob(rawBlob, displayFilename)
+          .then(() => idbMarkPhotoUploaded(label))
+          .catch(err => console.warn('Drive upload failed (will retry):', err));
+      }
+
       // リトライキュードレイン
       drainDriveRetryQueue();
 
@@ -7763,6 +7833,72 @@
         hideLoading();
       } finally {
         isSaving = false;
+      }
+    }
+
+    // 写真一括ダウンロード（最終保険）
+    // IDB photos store の全写真を ZIP にまとめてダウンロード
+    async function downloadAllPhotosAsZip() {
+      showLoading('Packaging photos...');
+      try {
+        const stored = await idbLoadPhotos();
+        // メモリの photoData からも写真を集める (IDBに無い分の保険)
+        const memPhotos = (photoData || []).filter(p => p.imageBase64);
+
+        if (stored.length === 0 && memPhotos.length === 0) {
+          hideLoading();
+          alert('No photos to download');
+          return;
+        }
+
+        const zip = new JSZip();
+        const seen = new Set();
+        let count = 0;
+
+        // IDBから優先（rawBlobがあれば元画質で保存）
+        for (const rec of stored) {
+          const label = rec.key.split('::').pop();
+          const filename = rec.rawFilename || `photo_${label}.jpg`;
+          if (seen.has(filename)) continue;
+          seen.add(filename);
+          if (rec.rawBlob) {
+            zip.file(filename, rec.rawBlob);
+          } else if (rec.dataUrl) {
+            const m = rec.dataUrl.match(/^data:image\/\w+;base64,(.+)$/);
+            if (m) zip.file(filename, m[1], { base64: true });
+          }
+          count++;
+        }
+
+        // メモリ側でIDBに無いものを追加
+        for (const p of memPhotos) {
+          const filename = p.filename || `photo_${p.label}.jpg`;
+          if (seen.has(filename)) continue;
+          seen.add(filename);
+          const m = p.imageBase64.match(/^data:image\/\w+;base64,(.+)$/);
+          if (m) {
+            zip.file(filename, m[1], { base64: true });
+            count++;
+          }
+        }
+
+        if (count === 0) {
+          hideLoading();
+          alert('No photos to download');
+          return;
+        }
+
+        const blob = await zip.generateAsync({ type: 'blob' });
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const baseName = (currentFileName || 'karte').replace(/\.xlsx$/i, '');
+        const zipName = `photos_${baseName}_${ts}.zip`;
+        downloadBlob(blob, zipName);
+        hideLoading();
+        setStatus(`${count} photos zipped`, zipName);
+      } catch (err) {
+        console.error('Photos ZIP failed:', err);
+        hideLoading();
+        alert('Failed to create photos ZIP: ' + err.message);
       }
     }
 
