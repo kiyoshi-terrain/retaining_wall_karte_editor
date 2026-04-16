@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Retaining Wall Karte">
-  <meta name="theme-color" content="#000000">
+  <meta name="theme-color" content="#1a1a2e">
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'self' capacitor: https:;
     script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://accounts.google.com capacitor:;
@@ -24,7 +24,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="manifest" href="manifest.json">
-  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="icon-180.png">
+  <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
+  <link rel="apple-touch-icon-precomposed" href="icon-180.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 
   <title>Retaining Wall Karte - No More Excel Hell</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"
@@ -1723,6 +1726,11 @@
       <span class="menu-label">Save As</span>
       <span class="menu-hint">Choose location</span>
     </button>
+    <button class="menu-sheet-btn" onclick="closeMenuSheet(); downloadAllPhotosAsZip();">
+      <span class="menu-icon">[IMG]</span>
+      <span class="menu-label">Photos ZIP</span>
+      <span class="menu-hint">Download all photos as backup</span>
+    </button>
     <button class="menu-sheet-btn" onclick="closeMenuSheet(); window.open('batch-compress.html','_blank');">
       <span class="menu-icon">[Z]</span>
       <span class="menu-label">Compress</span>
@@ -1851,6 +1859,8 @@
     let photoData = [];
     let currentPhotoIndex = null;
     let hasUnsavedChanges = false;
+    // Web Locks: 他タブで同じファイルが開かれていないか排他制御
+    let fileLockRelease = null;    // ロック解放用のresolver (null = ロック未保持)
     let savedColumnWidths = {}; // シートごとの列幅を保持
     let savedRowHeights = {};   // シートごとの行高さを保持
     let savedOriginalColsXml = {}; // シートごとの元の<cols>XMLを保持（キー: シート名）
@@ -1858,10 +1868,6 @@
     let savedColsByFilePath = {};  // ファイルパス(sheet1.xmlなど) → 元の<cols>XML（マッピング失敗時フォールバック用）
     let savedFmtByFilePath = {};   // ファイルパス → 元の<sheetFormatPr>（マッピング失敗時フォールバック用）
     let savedNormalFont = null;    // 原本のNormalフォント(fontId=0)XML — 列幅計算の基準
-    // ロード時に空スタブへ差し替えたレガシー/マクロ用シートの原本XMLを保持（保存時に復元）
-    // キー: "xl/worksheets/sheetN.xml" のファイルパス, 値: 原本のXML文字列
-    let stubbedLegacySheetXml = {};
-    let stubbedLegacySheetRelsXml = {};
     // ★ Phase 1j: 擁壁フォーマット用の delta 保存に使う「原本 zip バッファ」。
     //   ExcelJS/xlsx-populate に zip 再生成させず、load 時のバイト列を基点に
     //   必要な XML だけ差し替えて save する。
@@ -1898,8 +1904,47 @@
     // IndexedDB ローカル保存（ダウンロードバーなし）
     // ============================
     const IDB_NAME = 'RetainingWallKarteDB';
-    const IDB_VERSION = 1;
+    const IDB_VERSION = 3;
     const IDB_STORE = 'files';
+    const IDB_PHOTO_STORE = 'photos';
+    const IDB_ANNOTATION_STORE = 'annotations';
+
+    // ============================
+    // Web Locks: 他タブとの排他制御
+    // ============================
+    // 同一ファイルを複数タブで同時に開くと delta-save 競合でデータ破損の恐れ。
+    // Web Locks APIで "file:{filename}" に排他ロックを取り、他タブでの同時オープンを拒否する。
+    // タブを閉じるとブラウザが自動でロック解放するため cleanup 漏れなし。
+    async function acquireFileLock(filename) {
+      if (!navigator.locks) {
+        console.warn('[FileLock] Web Locks API not available');
+        return true; // 古いブラウザではロック無効化（機能を阻害しない）
+      }
+      const lockName = `file:${filename}`;
+      return new Promise((resolveOuter) => {
+        // ifAvailable: 既にロックされていれば即座に null で callback が呼ばれる
+        navigator.locks.request(lockName, { mode: 'exclusive', ifAvailable: true }, (lock) => {
+          if (!lock) {
+            // 他タブが保持中
+            resolveOuter(false);
+            return Promise.resolve();
+          }
+          // ロック取得成功。callback の Promise が未解決である間ロック保持。
+          // fileLockRelease を呼ぶとロック解放される。
+          return new Promise((releaseFn) => {
+            fileLockRelease = releaseFn;
+            resolveOuter(true);
+          });
+        });
+      });
+    }
+
+    function releaseFileLock() {
+      if (fileLockRelease) {
+        fileLockRelease();
+        fileLockRelease = null;
+      }
+    }
 
     function openIDB() {
       return new Promise((resolve, reject) => {
@@ -1909,10 +1954,243 @@
           if (!db.objectStoreNames.contains(IDB_STORE)) {
             db.createObjectStore(IDB_STORE, { keyPath: 'name' });
           }
+          if (!db.objectStoreNames.contains(IDB_PHOTO_STORE)) {
+            db.createObjectStore(IDB_PHOTO_STORE, { keyPath: 'key' });
+          }
+          if (!db.objectStoreNames.contains(IDB_ANNOTATION_STORE)) {
+            db.createObjectStore(IDB_ANNOTATION_STORE, { keyPath: 'key' });
+          }
         };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
+    }
+
+    // ============================
+    // IDB個別写真ストア
+    // ============================
+    // key = "filename::label" (例: "横急-027.xlsx::15")
+    function photoStoreKey(label) {
+      return (currentFileName || '_unsaved') + '::' + label;
+    }
+
+    async function idbSavePhoto(label, dataUrl, rawBlob, rawFilename) {
+      try {
+        const db = await openIDB();
+        const tx = db.transaction(IDB_PHOTO_STORE, 'readwrite');
+        const store = tx.objectStore(IDB_PHOTO_STORE);
+        store.put({
+          key: photoStoreKey(label),
+          dataUrl: dataUrl,
+          rawBlob: rawBlob || null,
+          rawFilename: rawFilename || null,
+          driveUploadPending: !!rawBlob,
+          savedAt: new Date().toISOString(),
+        });
+        await new Promise((resolve, reject) => {
+          tx.oncomplete = () => { db.close(); resolve(); };
+          tx.onerror = () => { db.close(); reject(tx.error); };
+        });
+      } catch (err) {
+        console.warn('idbSavePhoto failed:', err);
+      }
+    }
+
+    async function idbLoadPhotos() {
+      try {
+        const prefix = (currentFileName || '_unsaved') + '::';
+        const db = await openIDB();
+        const tx = db.transaction(IDB_PHOTO_STORE, 'readonly');
+        const store = tx.objectStore(IDB_PHOTO_STORE);
+        const all = await new Promise((resolve, reject) => {
+          const req = store.getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => reject(req.error);
+        });
+        db.close();
+        return all.filter(r => r.key.startsWith(prefix));
+      } catch (err) {
+        console.warn('idbLoadPhotos failed:', err);
+        return [];
+      }
+    }
+
+    async function idbMarkPhotoUploaded(label) {
+      try {
+        const db = await openIDB();
+        const tx = db.transaction(IDB_PHOTO_STORE, 'readwrite');
+        const store = tx.objectStore(IDB_PHOTO_STORE);
+        const key = photoStoreKey(label);
+        const existing = await new Promise((resolve, reject) => {
+          const req = store.get(key);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        if (existing) {
+          existing.driveUploadPending = false;
+          existing.rawBlob = null;
+          store.put(existing);
+        }
+        await new Promise((resolve, reject) => {
+          tx.oncomplete = () => { db.close(); resolve(); };
+          tx.onerror = () => { db.close(); reject(tx.error); };
+        });
+      } catch (err) {
+        console.warn('idbMarkPhotoUploaded failed:', err);
+      }
+    }
+
+    // ============================
+    // IDB Annotation Store（Add memo/手書き）
+    // ============================
+    function annotationStoreKey(sheetName) {
+      return (currentFileName || '_unsaved') + '::' + sheetName;
+    }
+
+    async function idbSaveAnnotation(sheetName, annotationObj) {
+      try {
+        const db = await openIDB();
+        const tx = db.transaction(IDB_ANNOTATION_STORE, 'readwrite');
+        const store = tx.objectStore(IDB_ANNOTATION_STORE);
+        store.put({
+          key: annotationStoreKey(sheetName),
+          sheetName: sheetName,
+          drawingDataUrl: annotationObj.drawingDataUrl || null,
+          compositeDataUrl: annotationObj.compositeDataUrl || null,
+          drawObjects: annotationObj.drawObjects || [],
+          isModified: annotationObj.isModified || false,
+          isStickyNote: annotationObj.isStickyNote || false,
+          parentSheet: annotationObj.parentSheet || null,
+          originalImages: annotationObj.originalImages || [],
+          savedAt: new Date().toISOString(),
+        });
+        await new Promise((resolve, reject) => {
+          tx.oncomplete = () => { db.close(); resolve(); };
+          tx.onerror = () => { db.close(); reject(tx.error); };
+        });
+      } catch (err) {
+        console.warn('idbSaveAnnotation failed:', err);
+      }
+    }
+
+    async function idbLoadAnnotations() {
+      try {
+        const prefix = (currentFileName || '_unsaved') + '::';
+        const db = await openIDB();
+        const tx = db.transaction(IDB_ANNOTATION_STORE, 'readonly');
+        const store = tx.objectStore(IDB_ANNOTATION_STORE);
+        const all = await new Promise((resolve, reject) => {
+          const req = store.getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => reject(req.error);
+        });
+        db.close();
+        return all.filter(r => r.key.startsWith(prefix));
+      } catch (err) {
+        console.warn('idbLoadAnnotations failed:', err);
+        return [];
+      }
+    }
+
+    async function idbMarkAnnotationSynced(sheetName) {
+      try {
+        const db = await openIDB();
+        const tx = db.transaction(IDB_ANNOTATION_STORE, 'readwrite');
+        const store = tx.objectStore(IDB_ANNOTATION_STORE);
+        const key = annotationStoreKey(sheetName);
+        const existing = await new Promise((resolve, reject) => {
+          const req = store.get(key);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        if (existing) {
+          existing.isModified = false;
+          store.put(existing);
+        }
+        await new Promise((resolve, reject) => {
+          tx.oncomplete = () => { db.close(); resolve(); };
+          tx.onerror = () => { db.close(); reject(tx.error); };
+        });
+      } catch (err) {
+        console.warn('idbMarkAnnotationSynced failed:', err);
+      }
+    }
+
+    // ============================
+    // GDrive リトライキュー
+    // ============================
+    let driveRetryRunning = false;
+
+    async function drainDriveRetryQueue() {
+      if (driveRetryRunning || !gdriveAccessToken) return;
+      driveRetryRunning = true;
+      try {
+        const photos = await idbLoadPhotos();
+        const pending = photos.filter(p => p.driveUploadPending && p.rawBlob);
+        if (pending.length === 0) { driveRetryRunning = false; return; }
+        console.log(`[driveRetry] ${pending.length} photos pending upload`);
+        let successCount = 0;
+        let failCount = 0;
+        for (const p of pending) {
+          try {
+            await ensureGdriveToken();
+            const label = p.key.split('::').pop();
+            const filename = p.rawFilename || `photo_${label}.jpg`;
+            await uploadRawPhotoToDriveBlob(p.rawBlob, filename);
+            await idbMarkPhotoUploaded(label);
+            console.log(`[driveRetry] uploaded: ${filename}`);
+            successCount++;
+          } catch (err) {
+            console.warn('[driveRetry] failed:', err);
+            failCount++;
+            // 認証エラーは即中断（トークン失効の可能性）
+            if (err && err.message && /auth|401|token/i.test(err.message)) {
+              console.warn('[driveRetry] auth error, aborting queue');
+              break;
+            }
+            // 連続3件失敗したら中断（ネットワーク障害）
+            if (failCount >= 3) {
+              console.warn('[driveRetry] too many failures, aborting queue');
+              break;
+            }
+            // それ以外は次の写真へ（個別エラー）
+            continue;
+          }
+        }
+        if (successCount > 0) {
+          setStatus(`${successCount} photos uploaded to Drive`, '');
+        }
+      } catch (err) {
+        console.warn('[driveRetry] queue drain error:', err);
+      }
+      driveRetryRunning = false;
+    }
+
+    // リトライ用: Blob直接アップロード（File不要）
+    async function uploadRawPhotoToDriveBlob(blob, filename) {
+      await ensureGdriveToken();
+      let photosId;
+      if (driveParentFolderId) {
+        photosId = await getOrCreateDriveFolder('Photos', driveParentFolderId);
+      } else {
+        const rootId = await getOrCreateDriveFolder('RetainingWallKarte');
+        photosId = await getOrCreateDriveFolder('Photos', rootId);
+      }
+      let subFolderId = photosId;
+      if (currentFileName) {
+        const subName = currentFileName.replace(/\.xlsx$/i, '');
+        subFolderId = await getOrCreateDriveFolder(subName, photosId);
+      }
+      const metadata = { name: filename, parents: [subFolderId] };
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+      form.append('file', blob);
+      const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${gdriveAccessToken}` },
+        body: form
+      });
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
     }
 
     async function idbSave(filename, blob) {
@@ -1983,8 +2261,6 @@
     let drawingTextSize = 12;      // テキスト注釈のフォントサイズ
     let drawingColor = '#ff0000';
     let drawingLineWidth = 3;
-    let drawingHistory = [];       // Phase移行中は残す（Phase 2完了後に削除）
-    let drawingHistoryIndex = -1;  // Phase移行中は残す
     let drawingTransform = { x: 0, y: 0, scale: 1 };
     let activePointers = new Map();
 
@@ -2006,14 +2282,6 @@
     // ============================
     // セキュリティユーティリティ
     // ============================
-    // HTMLエスケープ（XSS防止）
-    function escapeHtml(str) {
-      if (str == null) return '';
-      const div = document.createElement('div');
-      div.textContent = String(str);
-      return div.innerHTML;
-    }
-
     // 機密データクリア（ファイルクローズ時・バックグラウンド移行時）
     function clearSensitiveData() {
       workbook = null;
@@ -2031,6 +2299,8 @@
       if (cacheCanvas) { cacheCanvas.width = 0; cacheCanvas = null; cacheCtx = null; }
       if (drawingCanvas) { drawingCanvas.width = 0; }
       if (bgCanvas) { bgCanvas.width = 0; }
+      // ファイルロックを解放（他タブで開けるようにする）
+      releaseFileLock();
     }
 
     // 未保存変更の離脱警告
@@ -2073,6 +2343,45 @@
 
     // GISライブラリ読み込み完了時に初期化
     window.addEventListener('load', () => setTimeout(initGoogleDrive, 500));
+
+    // Service Worker 登録（オフライン対応 + PWAインストール）
+    window.addEventListener('load', () => {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('./service-worker.js')
+          .then(reg => console.log('[SW] registered:', reg.scope))
+          .catch(err => console.warn('[SW] registration failed:', err));
+      }
+    });
+
+    // IDBエビクション防止: ブラウザにデータの永続化を要請
+    window.addEventListener('load', async () => {
+      try {
+        if (navigator.storage && navigator.storage.persist) {
+          const already = await navigator.storage.persisted();
+          if (!already) {
+            const granted = await navigator.storage.persist();
+            console.log(`[storage.persist] granted=${granted}`);
+          } else {
+            console.log('[storage.persist] already persisted');
+          }
+        }
+      } catch (err) {
+        console.warn('[storage.persist] failed:', err);
+      }
+    });
+
+    // ネットワーク復帰時にGDriveリトライキューをドレイン
+    window.addEventListener('online', () => {
+      console.log('[network] online event → drain GDrive retry queue');
+      if (gdriveAccessToken) drainDriveRetryQueue();
+    });
+
+    // 定期リトライ（30秒ごと、オンライン時のみ）
+    setInterval(() => {
+      if (navigator.onLine && gdriveAccessToken) {
+        drainDriveRetryQueue();
+      }
+    }, 30000);
 
     async function ensureGdriveToken() {
       if (gdriveAccessToken && Date.now() < gdriveTokenExpiry - 60000) {
@@ -2207,7 +2516,7 @@
           const item = document.createElement('div');
           item.className = 'drive-file-item';
           const size = f.size ? formatBytes(parseInt(f.size)) : '';
-          const date = f.modifiedTime ? new Date(f.modifiedTime).toLocaleDateString('ja-JP') : '';
+          const date = f.modifiedTime ? new Date(f.modifiedTime).toLocaleString('ja-JP', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '';
           item.innerHTML = `<div class="drive-file-icon">\uD83D\uDCC4</div><div class="drive-file-info"><div class="drive-file-name">${escapeHtml(f.name)}</div><div class="drive-file-meta">${size}${size && date ? ' \u00B7 ' : ''}${date}</div></div>`;
           item.onclick = () => openDriveFile(f.id, f.name);
           listEl.appendChild(item);
@@ -2413,6 +2722,10 @@
           // 以降のSaveでDrive上書きに切り替え
           driveFileId = data.id;
           driveFileName = filename;
+          // 写真アップロード先をExcelと同じフォルダに統一
+          if (!driveParentFolderId) {
+            driveParentFolderId = targetFolderId;
+          }
           document.getElementById('current-file-path').textContent = 'Google Drive';
           setStatus('Uploaded to Google Drive', filename);
         }
@@ -2427,7 +2740,15 @@
 
         hasUnsavedChanges = false;
         photoData.forEach(p => p.isModified = false);
-        Object.values(annotationData).forEach(ad => ad.isModified = false);
+        // Excel保存完了後、IDB annotation storeも同期済みにマーク
+        for (const [sheetName, ad] of Object.entries(annotationData)) {
+          if (ad && ad.isModified) {
+            await idbMarkAnnotationSynced(sheetName);
+          }
+          ad.isModified = false;
+        }
+        // GDrive保存成功 → リトライキューをドレイン（前回失敗分を再送）
+        drainDriveRetryQueue();
         hideLoading();
       } catch (err) {
         console.error('Drive upload error:', err);
@@ -2504,44 +2825,32 @@
     }
 
     // Google Drive にRaw Photo原本をアップロード（GPS+撮影日時EXIF付与）
-    async function uploadRawPhotoToDrive(file, filename) {
-      if (!gdriveAccessToken) return; // 未認証ならスキップ（サイレント）
+    async function uploadRawPhotoToDrive(file, filename, label) {
+      if (!gdriveAccessToken) return;
       try {
         await ensureGdriveToken();
 
-        // 写真保存先フォルダを決定
         let photosId;
         if (driveParentFolderId) {
-          // 共有フォルダモード: Excelの親フォルダ内にPhotos/を作成
           photosId = await getOrCreateDriveFolder('Photos', driveParentFolderId);
         } else {
-          // フォールバック: My Drive/RetainingWallKarte/Photos/
           const rootId = await getOrCreateDriveFolder('RetainingWallKarte');
           photosId = await getOrCreateDriveFolder('Photos', rootId);
         }
 
-        // サブフォルダ: Excelファイル名（拡張子除く）
         let subFolderId = photosId;
         if (currentFileName) {
           const subName = currentFileName.replace(/\.xlsx$/i, '');
           subFolderId = await getOrCreateDriveFolder(subName, photosId);
         }
 
-        // GPS座標を取得してEXIFに注入（失敗時はrawのままアップロード）
         let uploadBlob = file;
         try {
           const pos = await getCurrentPosition();
           uploadBlob = await injectExifGps(file, pos.coords);
-          console.log(`EXIF injected: GPS(${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)})`);
-        } catch (geoErr) {
-          console.warn('GPS取得スキップ（権限拒否 or タイムアウト）:', geoErr.message);
-          // rawファイルのままアップロード続行
-        }
+        } catch (_) { /* GPS取得失敗はrawのまま */ }
 
-        const metadata = {
-          name: filename,
-          parents: [subFolderId]
-        };
+        const metadata = { name: filename, parents: [subFolderId] };
         const form = new FormData();
         form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
         form.append('file', uploadBlob);
@@ -2553,9 +2862,10 @@
         });
         if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
         console.log('Raw photo uploaded to Drive:', filename);
+        if (label) idbMarkPhotoUploaded(label);
       } catch (err) {
         console.warn('Raw photo Drive upload failed:', err);
-        // 失敗してもExcel処理は続行（サイレント）
+        setStatus('Photo backup failed', filename);
       }
     }
 
@@ -2842,7 +3152,6 @@
         + String(now.getSeconds()).padStart(2, '0');
       const displayFilename = `${label}_${ts}.jpg`;
 
-      // 画像サイズ取得
       const img = new Image();
       await new Promise((resolve, reject) => {
         img.onload = resolve;
@@ -2855,13 +3164,57 @@
       photoData[currentPhotoIndex].imageHeight = img.naturalHeight;
       photoData[currentPhotoIndex].isModified = true;
       photoData[currentPhotoIndex].isDummy = false;
-
-      // ファイル名を写真上セル用に保存（コメントには追記しない）
       photoData[currentPhotoIndex].filename = displayFilename;
       hasUnsavedChanges = true;
+
+      // dataUrl → Blob 変換 (GDriveリトライ対象にするため)
+      let rawBlob = null;
+      try {
+        const resp = await fetch(dataUrl);
+        rawBlob = await resp.blob();
+      } catch (err) {
+        console.warn('dataUrl→Blob変換失敗:', err);
+      }
+
+      // GPS注入（Capacitorカメラは dataUrl に EXIF 含まないため補完）
+      let gpsStatus = null;
+      if (rawBlob) {
+        try {
+          const pos = await getCurrentPosition();
+          rawBlob = await injectExifGps(rawBlob, pos.coords);
+          gpsStatus = 'ok';
+          console.log(`[GPS] ${label}: ${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)} (±${Math.round(pos.coords.accuracy)}m)`);
+        } catch (err) {
+          if (err && err.code === 1) gpsStatus = 'denied';
+          else if (err && err.code === 2) gpsStatus = 'unavailable';
+          else if (err && err.code === 3) gpsStatus = 'timeout';
+          else gpsStatus = 'unavailable';
+          console.warn(`[GPS] failed for ${label}:`, err);
+        }
+      }
+
+      // IDBに写真を即時保存（rawBlobも一緒に保存してGDriveリトライ可能にする）
+      idbSavePhoto(label, dataUrl, rawBlob, displayFilename);
+
+      // GDriveへ直接アップロード（ベストエフォート）
+      if (gdriveAccessToken && rawBlob) {
+        uploadRawPhotoToDriveBlob(rawBlob, displayFilename)
+          .then(() => idbMarkPhotoUploaded(label))
+          .catch(err => console.warn('Drive upload failed (will retry):', err));
+      }
+
+      // リトライキュードレイン
+      drainDriveRetryQueue();
+
       renderPhotoGrid();
       updateStats();
-      setStatus('Photo added', photoData[currentPhotoIndex].label);
+      const gpsMsg = {
+        ok:          'Photo added (GPS OK)',
+        denied:      'Photo added (GPS denied — enable location)',
+        unavailable: 'Photo added (GPS unavailable)',
+        timeout:     'Photo added (GPS timeout)'
+      }[gpsStatus] || 'Photo added';
+      setStatus(gpsMsg, label);
     }
 
     // ============================
@@ -3765,6 +4118,15 @@
 
     // Excelファイル読み込み
     async function loadExcelFile(file) {
+      // 他タブで同じファイルが開かれていないか確認（Web Locks）
+      // 既に別ファイルを開いていた場合は先に解放してから新規取得
+      releaseFileLock();
+      const acquired = await acquireFileLock(file.name);
+      if (!acquired) {
+        alert(`"${file.name}" は別のタブで既に開かれています。\nそのタブを閉じるか、別のファイルを選択してください。`);
+        return;
+      }
+
       showLoading('Loading Excel...');
 
       try {
@@ -3797,8 +4159,6 @@
         savedSheetFormatPr = {};
         savedColsByFilePath = {};
         savedFmtByFilePath = {};
-        stubbedLegacySheetXml = {};
-        stubbedLegacySheetRelsXml = {};
         let zipSheetNames = []; // ZIP内のシート名一覧（ExcelJS読み落とし検出用）
         try {
           const zip = await JSZip.loadAsync(loadBuffer);
@@ -4166,6 +4526,11 @@
         formatType: 'slope' // slope-karteフォーマット識別子 (保存時の画像配置ロジック分岐に使用)
       }));
 
+      // IDB写真ストアから欠落分を復元
+      restorePhotosFromIDB();
+      // IDB annotation ストアから欠落分を復元
+      restoreAnnotationsFromIDB();
+
       renderPhotoGrid();
       updateStats();
       hideLoading();
@@ -4343,9 +4708,76 @@
       const withComment = photoData.filter(e => e.comment.trim() !== '').length;
       console.log(`[RetainingWall] frames=${photoData.length} withPathString=${withPath} embedded=${withEmbed} withComment=${withComment}`);
 
+      // IDB写真ストアから欠落分を復元
+      restorePhotosFromIDB();
+      // IDB annotation ストアから欠落分を復元
+      restoreAnnotationsFromIDB();
+
       renderPhotoGrid();
       updateStats();
       hideLoading();
+    }
+
+    async function restorePhotosFromIDB() {
+      try {
+        const stored = await idbLoadPhotos();
+        if (stored.length === 0) return;
+        let restored = 0;
+        for (const rec of stored) {
+          const label = rec.key.split('::').pop();
+          const photo = photoData.find(p => p.label === label);
+          if (photo && !photo.imageBase64 && rec.dataUrl) {
+            photo.imageBase64 = rec.dataUrl;
+            photo.isDummy = false;
+            photo.isModified = true;
+            restored++;
+          }
+        }
+        if (restored > 0) {
+          console.log(`[IDB restore] ${restored} photos recovered from local backup`);
+          setStatus(`${restored} photos restored from backup`, '');
+          hasUnsavedChanges = true;
+          renderPhotoGrid();
+          updateStats();
+        }
+        // GDriveリトライキューもドレイン
+        drainDriveRetryQueue();
+      } catch (err) {
+        console.warn('restorePhotosFromIDB failed:', err);
+      }
+    }
+
+    async function restoreAnnotationsFromIDB() {
+      try {
+        const stored = await idbLoadAnnotations();
+        if (stored.length === 0) return;
+        let restored = 0;
+        for (const rec of stored) {
+          const sheetName = rec.sheetName;
+          if (!annotationData[sheetName]) {
+            annotationData[sheetName] = {};
+          }
+          const ad = annotationData[sheetName];
+          // 空のエントリなら復元（Excelから読み込めなかったケース）
+          if (!ad.drawingDataUrl && rec.drawingDataUrl) {
+            ad.drawingDataUrl = rec.drawingDataUrl;
+            ad.compositeDataUrl = rec.compositeDataUrl || null;
+            ad.drawObjects = rec.drawObjects || [];
+            ad.isStickyNote = rec.isStickyNote || false;
+            ad.parentSheet = rec.parentSheet || null;
+            ad.originalImages = rec.originalImages || [];
+            ad.isModified = true;
+            restored++;
+          }
+        }
+        if (restored > 0) {
+          console.log(`[IDB restore] ${restored} annotations recovered from local backup`);
+          setStatus(`${restored} annotations restored from backup`, '');
+          hasUnsavedChanges = true;
+        }
+      } catch (err) {
+        console.warn('restoreAnnotationsFromIDB failed:', err);
+      }
     }
 
     // 統計情報更新
@@ -4411,6 +4843,31 @@
     }
 
     // 図面シート表示（fig Top / fig Side / fig Photo / comments等）
+    // per-image annotationキーからシート名を取得するヘルパー
+    function getFigParentSheet(key) {
+      const sep = key.indexOf('::fig');
+      return sep >= 0 ? key.substring(0, sep) : key;
+    }
+
+    // 画像群が空間的に分離しているかを判定
+    // （背景＋マーカーのオーバーレイではなく、別々の図が並んでいる場合にtrue）
+    function areImagesSpatiallyGrouped(figImages) {
+      if (figImages.length <= 1) return true; // 1枚以下は「まとまっている」扱い
+      let maxRowSpan = 0;
+      let globalMinRow = Infinity, globalMaxRow = -Infinity;
+      figImages.forEach(img => {
+        const tlRow = img.range.tl.nativeRow ?? img.range.tl.row ?? 0;
+        const brRow = img.range.br?.nativeRow ?? img.range.br?.row ?? (tlRow + 30);
+        const span = brRow - tlRow;
+        if (span > maxRowSpan) maxRowSpan = span;
+        if (tlRow < globalMinRow) globalMinRow = tlRow;
+        if (brRow > globalMaxRow) globalMaxRow = brRow;
+      });
+      const totalSpan = globalMaxRow - globalMinRow;
+      // 全体のrow幅が最大画像の1.8倍を超えたら「分離」と見なす
+      return totalSpan <= maxRowSpan * 1.8;
+    }
+
     function renderFigSheet(sheet, sheetName) {
       document.getElementById('stats').innerHTML = '';
       showLoading('Loading drawing...');
@@ -4437,6 +4894,38 @@
       });
 
       if (!annotationData[sheetName]) {
+        if (figImages.length > 1 && !areImagesSpatiallyGrouped(figImages)) {
+          // 画像が空間的に分離 → 個別表示モード
+          // row順にソート
+          figImages.sort((a, b) => {
+            const aRow = a.range.tl.nativeRow ?? a.range.tl.row ?? 0;
+            const bRow = b.range.tl.nativeRow ?? b.range.tl.row ?? 0;
+            return aRow - bRow;
+          });
+          annotationData[sheetName] = {
+            backgroundDataUrl: null,
+            drawingDataUrl: null,
+            compositeDataUrl: null,
+            isModified: false,
+            originalImages: figImages,
+            showIndividual: true,
+          };
+          // 各画像ごとのannotationエントリを作成
+          figImages.forEach((img, i) => {
+            const key = sheetName + '::fig' + i;
+            if (!annotationData[key]) {
+              annotationData[key] = {
+                backgroundDataUrl: img.dataUrl,
+                drawingDataUrl: null,
+                compositeDataUrl: null,
+                isModified: false,
+                originalImages: [img],
+              };
+            }
+          });
+          renderFigSheetUI(sheet, sheetName);
+          return;
+        }
         if (figImages.length > 1) {
           // 損傷図(2) のような縦に並ぶ独立ページ図面か、
           // fig Photo のような背景+マーカー重ねかを判定
@@ -4623,7 +5112,6 @@
     // 図面シートUI描画
     function renderFigSheetUI(sheet, sheetName) {
       const ad = annotationData[sheetName];
-      const displayImage = ad.compositeDataUrl || ad.backgroundDataUrl;
 
       // このシートに紐付く付箋メモを収集
       const sheetStickies = Object.entries(annotationData)
@@ -4658,6 +5146,7 @@
         `;
       }
 
+      const displayImage = ad.compositeDataUrl || ad.backgroundDataUrl;
       photoGrid.innerHTML = `
         <div class="fig-sheet-container">
           <h3 style="color: #00a84f; margin-bottom: 16px;">${escapeHtml(sheet.name)}</h3>
@@ -4736,8 +5225,6 @@
       drawingTool = 'pen';
       drawingColor = '#ff0000';
       drawingLineWidth = 3;
-      drawingHistory = [];
-      drawingHistoryIndex = -1;
       drawingTransform = { x: 0, y: 0, scale: 1 };
       isDrawing = false;
       activePointers.clear();
@@ -4801,7 +5288,7 @@
           renderDrawingObjects();
         } else {
           drawObjects = [];
-          saveDrawingState();
+
         }
 
         modal.classList.add('active');
@@ -5381,11 +5868,6 @@
     }
 
     // --- Undo/Redo (互換ラッパー + 新方式) ---
-
-    function saveDrawingState() {
-      // レガシー互換: openDrawingModal初期化時のみ使用
-      // オブジェクト方式ではpushUndo()を直接使用
-    }
 
     function undoDrawing() { undoObj(); }
     function redoDrawing() { redoObj(); }
@@ -6254,8 +6736,6 @@
       drawingTool = 'pen';
       drawingColor = '#222222';
       drawingLineWidth = 3;
-      drawingHistory = [];
-      drawingHistoryIndex = -1;
       drawingTransform = { x: 0, y: 0, scale: 1 };
       isDrawing = false;
       activePointers.clear();
@@ -6272,8 +6752,6 @@
 
       updateDrawingToolbarUI();
       document.getElementById('drawing-width-select').value = '3';
-
-      saveDrawingState();
 
       // stickyNote用のsheetNameにプレフィックスを付けて識別
       const stickyKey = `__sticky__${sheetName}__${Date.now()}`;
@@ -6299,9 +6777,9 @@
 
     function openStickyFromModal() {
       const currentSheet = drawingCanvas.dataset.sheetName;
-      // 付箋の親シートを特定（既に付箋の場合はその親シート）
+      // 付箋の親シートを特定（既に付箋の場合はその親シート、per-imageキーの場合は実シート名）
       const ad = annotationData[currentSheet];
-      const parentSheet = (ad && ad.isStickyNote) ? ad.parentSheet : currentSheet;
+      const parentSheet = (ad && ad.isStickyNote) ? ad.parentSheet : getFigParentSheet(currentSheet);
 
       // 現在のモーダルを閉じてから付箋を開く
       closeDrawingModal();
@@ -6388,11 +6866,14 @@
       annotationData[sheetName].isModified = true;
       hasUnsavedChanges = true;
 
+      // IDB即時バックアップ（Excel保存が失敗しても復旧可能）
+      idbSaveAnnotation(sheetName, annotationData[sheetName]);
+
       closeDrawingModal();
 
-      // 付箋メモの場合は親シートを再描画
+      // 付箋メモの場合は親シートを、per-image keyの場合は実シートを再描画
       const ad = annotationData[sheetName];
-      const renderSheet = ad.isStickyNote ? ad.parentSheet : sheetName;
+      const renderSheet = ad.isStickyNote ? ad.parentSheet : getFigParentSheet(sheetName);
       renderFigSheet(workbook.getWorksheet(renderSheet), renderSheet);
       setStatus(ad.isStickyNote ? 'Sticky note saved' : 'Annotation saved', renderSheet);
     }
@@ -6694,31 +7175,58 @@
         // ファイル名を解決（カメラ撮影時はIMG_YYYYMMDD_HHMMSS.jpg）
         const displayFilename = resolvePhotoFilename(file);
 
-        // Raw原本をGoogle Driveにアップロード（EXIF完全保持、非同期・サイレント）
-        // GDriveログイン済みなら自動アップロード（トグル不要）
-        if (gdriveAccessToken) {
-          uploadRawPhotoToDrive(file, displayFilename); // awaitしない → UIをブロックしない
-        }
-
         // Canvas経由で正規化（EXIF回転を適用、解像度リサイズ）
         const result = await normalizeImage(file, photoResolution);
+        const label = photoData[currentPhotoIndex].label;
 
         photoData[currentPhotoIndex].imageBase64 = result.dataUrl;
         photoData[currentPhotoIndex].imageWidth = result.width;
         photoData[currentPhotoIndex].imageHeight = result.height;
         photoData[currentPhotoIndex].isModified = true;
         photoData[currentPhotoIndex].isDummy = false;
-
-        // ファイル名を写真上セル用に保存（コメントには追記しない）
         photoData[currentPhotoIndex].filename = displayFilename;
         hasUnsavedChanges = true;
+
+        // ① IDBに写真を即時保存（最優先 — Excel保存が壊れても復旧可能）
+        // GPS注入済みのrawBlobも一緒に保存（GDriveリトライ用）
+        let rawBlob = file;
+        let gpsStatus = null;  // 'ok' | 'denied' | 'timeout' | 'unavailable' | null
+        try {
+          const pos = await getCurrentPosition();
+          rawBlob = await injectExifGps(file, pos.coords);
+          gpsStatus = 'ok';
+          console.log(`[GPS] ${label}: ${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)} (±${Math.round(pos.coords.accuracy)}m)`);
+        } catch (err) {
+          // PositionError code: 1=PERMISSION_DENIED, 2=POSITION_UNAVAILABLE, 3=TIMEOUT
+          if (err && err.code === 1) gpsStatus = 'denied';
+          else if (err && err.code === 2) gpsStatus = 'unavailable';
+          else if (err && err.code === 3) gpsStatus = 'timeout';
+          else gpsStatus = 'unavailable';
+          console.warn(`[GPS] failed for ${label}:`, err);
+        }
+        idbSavePhoto(label, result.dataUrl, rawBlob, displayFilename);
+
+        // ② GDriveにRawアップロード（ベストエフォート）
+        if (gdriveAccessToken) {
+          uploadRawPhotoToDrive(file, displayFilename, label);
+        }
+
+        // ③ リトライキューのドレイン（ついでに前回失敗分を再送）
+        drainDriveRetryQueue();
+
         renderPhotoGrid();
         updateStats();
-        setStatus('Photo added', photoData[currentPhotoIndex].label);
+        // GPS取得結果をステータスに反映
+        const gpsMsg = {
+          ok:          'Photo added (GPS OK)',
+          denied:      'Photo added (GPS denied — enable location)',
+          unavailable: 'Photo added (GPS unavailable)',
+          timeout:     'Photo added (GPS timeout)'
+        }[gpsStatus] || 'Photo added';
+        setStatus(gpsMsg, label);
 
-        // 撮影進捗を共有（status.json更新、非同期・サイレント）
         if (statusFileId) {
-          updateStatusOnDrive(photoData[currentPhotoIndex].label, 'done');
+          updateStatusOnDrive(label, 'done');
         }
       } catch (err) {
         console.error('写真処理エラー:', err);
@@ -6898,39 +7406,113 @@
       return String(s).replace(/[<>&"']/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[c]));
     }
 
-    // ヘルパー: シート XML 内の特定セルの値を書き換え or 追加 (inline string として)
-    //   既存セルがあれば value 要素を差し替え、無ければ該当 row に追記
-    function writeInlineStringCell(sheetXml, cellRef, text) {
-      const rowMatch = cellRef.match(/^([A-Z]+)(\d+)$/);
-      if (!rowMatch) return sheetXml;
-      const rowNum = rowMatch[2];
-      const xmlText = escapeXml(text);
-      const newCell = `<c r="${cellRef}" t="inlineStr"><is><t xml:space="preserve">${xmlText}</t></is></c>`;
-
-      // 既存の <c r="X"> があれば置換
-      const cellRe = new RegExp(`<c r="${cellRef}"[^/]*?(?:\\/>|>[\\s\\S]*?<\\/c>)`);
-      if (cellRe.test(sheetXml)) {
-        return sheetXml.replace(cellRe, newCell);
+    // 列文字列→数値インデックス変換 (A→1, B→2, ..., Z→26, AA→27, ...)
+    function colLettersToIndex(letters) {
+      let idx = 0;
+      for (let i = 0; i < letters.length; i++) {
+        idx = idx * 26 + (letters.charCodeAt(i) - 64);
       }
-      // 該当 row があれば末尾に追加
-      const rowRe = new RegExp(`(<row[^>]*r="${rowNum}"[^>]*>)([\\s\\S]*?)(<\\/row>)`);
-      const rowMatch2 = sheetXml.match(rowRe);
-      if (rowMatch2) {
-        return sheetXml.replace(rowRe, `$1$2${newCell}$3`);
-      }
-      // row も無いなら <sheetData> の末尾に新規 row 追加
-      return sheetXml.replace('</sheetData>', `<row r="${rowNum}">${newCell}</row></sheetData>`);
+      return idx;
     }
 
-    // ヘルパー: シート XML 内の特定セルの値だけクリア (セル自体は残す)
-    function clearCellValue(sheetXml, cellRef) {
-      const cellRe = new RegExp(`<c r="${cellRef}"([^/]*?)(?:\\/>|>[\\s\\S]*?<\\/c>)`);
-      return sheetXml.replace(cellRe, (match, attrs) => {
-        // t 属性を外して値を空に
-        const cleanAttrs = attrs.replace(/\s*t="[^"]*"/, '');
-        return `<c r="${cellRef}"${cleanAttrs}/>`;
-      });
+    // OOXML namespace
+    const SPREADSHEET_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+
+    // シートXMLをDOMに変換（1回だけパースし、複数セル操作後にserializeする）
+    function parseSheetXmlToDOM(sheetXml) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(sheetXml, 'text/xml');
+      if (doc.querySelector('parsererror')) {
+        console.error('parseSheetXmlToDOM: XML parse error');
+        return null;
+      }
+      return doc;
     }
+
+    function serializeSheetDOM(doc) {
+      return new XMLSerializer().serializeToString(doc);
+    }
+
+    // DOMベースのセル書き換え（docは既にパース済み、破壊的に変更）
+    function writeInlineStringCellDOM(doc, cellRef, text) {
+      const refMatch = cellRef.match(/^([A-Z]+)(\d+)$/);
+      if (!refMatch) return;
+      const colLetters = refMatch[1];
+      const rowNum = parseInt(refMatch[2]);
+      const colIdx = colLettersToIndex(colLetters);
+
+      const sheetData = doc.getElementsByTagName('sheetData')[0];
+      if (!sheetData) return;
+
+      let targetRow = null;
+      const rows = sheetData.getElementsByTagName('row');
+      for (let i = 0; i < rows.length; i++) {
+        if (parseInt(rows[i].getAttribute('r')) === rowNum) {
+          targetRow = rows[i]; break;
+        }
+      }
+
+      if (!targetRow) {
+        targetRow = doc.createElementNS(SPREADSHEET_NS, 'row');
+        targetRow.setAttribute('r', String(rowNum));
+        let insertBefore = null;
+        for (let i = 0; i < rows.length; i++) {
+          if (parseInt(rows[i].getAttribute('r')) > rowNum) {
+            insertBefore = rows[i]; break;
+          }
+        }
+        if (insertBefore) sheetData.insertBefore(targetRow, insertBefore);
+        else sheetData.appendChild(targetRow);
+      }
+
+      let targetCell = null;
+      const cells = targetRow.getElementsByTagName('c');
+      for (let i = 0; i < cells.length; i++) {
+        if (cells[i].getAttribute('r') === cellRef) {
+          targetCell = cells[i]; break;
+        }
+      }
+
+      if (targetCell) {
+        const style = targetCell.getAttribute('s');
+        while (targetCell.firstChild) targetCell.removeChild(targetCell.firstChild);
+        targetCell.setAttribute('t', 'inlineStr');
+        if (style) targetCell.setAttribute('s', style);
+      } else {
+        targetCell = doc.createElementNS(SPREADSHEET_NS, 'c');
+        targetCell.setAttribute('r', cellRef);
+        targetCell.setAttribute('t', 'inlineStr');
+        let insertBefore = null;
+        for (let i = 0; i < cells.length; i++) {
+          const existRef = cells[i].getAttribute('r');
+          const existCol = colLettersToIndex(existRef.replace(/\d+$/, ''));
+          if (existCol > colIdx) { insertBefore = cells[i]; break; }
+        }
+        if (insertBefore) targetRow.insertBefore(targetCell, insertBefore);
+        else targetRow.appendChild(targetCell);
+      }
+
+      const isElem = doc.createElementNS(SPREADSHEET_NS, 'is');
+      const tElem = doc.createElementNS(SPREADSHEET_NS, 't');
+      tElem.setAttribute('xml:space', 'preserve');
+      tElem.textContent = text;
+      isElem.appendChild(tElem);
+      targetCell.appendChild(isElem);
+    }
+
+    // DOMベースのセル値クリア（docは既にパース済み、破壊的に変更）
+    function clearCellValueDOM(doc, cellRef) {
+      const allCells = doc.getElementsByTagName('c');
+      for (let i = 0; i < allCells.length; i++) {
+        if (allCells[i].getAttribute('r') === cellRef) {
+          const cell = allCells[i];
+          while (cell.firstChild) cell.removeChild(cell.firstChild);
+          cell.removeAttribute('t');
+          break;
+        }
+      }
+    }
+
 
     // 本体: 擁壁フォーマット用の delta 保存
     async function buildSaveBlobRetainingWall() {
@@ -6969,20 +7551,26 @@
         : [];
       let nextPicId = (existingPicIds.length ? Math.max(...existingPicIds) : 0) + 1;
 
+      // シートXMLを1回だけDOMパースし、全セル操作をバッチ処理
+      const sheetDoc = noChanges ? null : parseSheetXmlToDOM(sheetXml);
+      if (!noChanges && !sheetDoc) {
+        throw new Error('Photo(2) シートXMLのパースに失敗しました');
+      }
+
       // 各変更photoを処理
       for (const photo of modifiedPhotos) {
-        // A. コメント更新
+        // A. コメント更新（DOM操作 — パース/シリアライズなしで高速）
         const commentText = photo.comment
           ? `（コメント）\n${photo.comment}`
           : '（コメント）';
         const commentRef = colNumToLetter(photo.commentCol) + photo.commentRow;
-        sheetXml = writeInlineStringCell(sheetXml, commentRef, commentText);
+        writeInlineStringCellDOM(sheetDoc, commentRef, commentText);
 
         // B. 新規画像
-        if (photo.imageBase64) {
+        if (photo.imageBase64 && !photo.imageBase64.startsWith('blob:')) {
           const match = photo.imageBase64.match(/^data:image\/(\w+);base64,(.+)$/);
           if (!match) {
-            console.warn(`画像データ不正: ${photo.label}`);
+            console.warn(`[delta-save] 画像データ不正 (想定外の形式): ${photo.label}`, photo.imageBase64.substring(0, 60));
             continue;
           }
           const ext = match[1] === 'jpg' ? 'jpeg' : match[1];
@@ -7033,9 +7621,13 @@
           nextPicId++;
           drawingXml = drawingXml.replace(/<\/xdr:wsDr>/, `${anchorXml}</xdr:wsDr>`);
 
-          // 5. 画像セル(labelRow,labelCol)のパス文字列をクリア
+          // 5. 画像セル(labelRow,labelCol)にファイル名を書き込む（旧パス文字列を置換）
           const imgCellRef = colNumToLetter(photo.labelCol) + photo.labelRow;
-          sheetXml = clearCellValue(sheetXml, imgCellRef);
+          if (photo.filename) {
+            writeInlineStringCellDOM(sheetDoc, imgCellRef, photo.filename);
+          } else {
+            clearCellValueDOM(sheetDoc, imgCellRef);
+          }
 
           console.log(`[delta-save] 画像追加: ${photo.label} → media/${mediaName} anchor=${newRId} picId=${nextPicId - 1}`);
         }
@@ -7157,7 +7749,8 @@
       // 書き戻し (変更があった場合のみ)
       let buffer;
       if (!noChanges) {
-        if (sheetXml) zip.file(sheetPath, sheetXml);
+        // DOM操作結果を1回だけシリアライズ
+        zip.file(sheetPath, serializeSheetDOM(sheetDoc));
         if (drawingXml && drawingPath) zip.file(drawingPath, drawingXml);
         if (drawingRelsXml && drawingRelsPath) zip.file(drawingRelsPath, drawingRelsXml);
         if (ctXml) zip.file('[Content_Types].xml', ctXml);
@@ -7166,6 +7759,8 @@
           compression: 'DEFLATE',
           compressionOptions: { level: 6 }
         });
+        // 次回のdelta saveが今回の変更を含むように原本バッファを更新
+        originalZipBuffer = buffer.slice(0);
       } else {
         // 変更なし: 原本バイトをそのまま使用 (暗号化処理は共通)
         buffer = originalZipBuffer.slice(0);
@@ -7253,7 +7848,7 @@
       }
 
       for (const photo of photoData) {
-        if (photo.isModified && photo.imageBase64) {
+        if (photo.isModified && photo.imageBase64 && !photo.imageBase64.startsWith('blob:')) {
           const match = photo.imageBase64.match(/^data:image\/(\w+);base64,(.+)$/);
           if (!match) continue;
 
@@ -7326,8 +7921,11 @@
       // 手書き線のみの透過PNGを元画像と同座標に重ねる
       for (const [sheetName, ad] of Object.entries(annotationData)) {
         if (!ad.isModified || !ad.drawingDataUrl) continue;
+        if (ad.showIndividual) continue; // 親エントリはスキップ（個別画像エントリで処理）
 
-        const figSheet = workbook.getWorksheet(sheetName);
+        // per-image key (e.g. "損傷図 (2)::fig0") → 実シート名を取得
+        const realSheetName = getFigParentSheet(sheetName);
+        const figSheet = workbook.getWorksheet(realSheetName);
         if (!figSheet) continue;
 
         const match = ad.drawingDataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
@@ -7430,28 +8028,6 @@
       // オリジナルではwidth="9"の列にcustomWidthがないため、Excelの表示列幅が変わる
       buffer = await fixExcelJSColWidths(buffer);
 
-      // ★ Phase 1g: ロード時に空スタブへ差し替えたレガシー/マクロ用シートを復元
-      //   ⚠️ 保留中: ExcelJS がロード→保存でシートXMLファイル番号を振り直すため、
-      //     元のファイルパス (xl/worksheets/sheet6.xml など) に書き戻しても
-      //     別のシートに割り当てられた位置を破壊してしまう。
-      //     固定パス→シート名で解決してから書き戻す必要があるため、一旦無効化。
-      //     代わりに保存時に正しいパスを解決する実装を追加するまで、Photo123 は空のまま保存される。
-      if (false && (Object.keys(stubbedLegacySheetXml).length > 0 || Object.keys(stubbedLegacySheetRelsXml).length > 0)) {
-        try {
-          const zip = await JSZip.loadAsync(buffer);
-          for (const [path, xml] of Object.entries(stubbedLegacySheetXml)) {
-            zip.file(path, xml);
-            console.log(`[Phase 1g] restored legacy sheet: ${path} (${xml.length} bytes)`);
-          }
-          for (const [path, xml] of Object.entries(stubbedLegacySheetRelsXml)) {
-            zip.file(path, xml);
-          }
-          buffer = await zip.generateAsync({ type: 'arraybuffer' });
-        } catch (e) {
-          console.warn('[Phase 1g] legacy sheet restore failed:', e);
-        }
-      }
-
       // ZIP整合性検証・修復（ExcelJSが壊したContent_Typesやdrawing参照を修正）
       buffer = await verifyAndFixZipIntegrity(buffer);
 
@@ -7536,7 +8112,13 @@
 
         hasUnsavedChanges = false;
         photoData.forEach(p => p.isModified = false);
-        Object.values(annotationData).forEach(ad => ad.isModified = false);
+        // Excel保存完了後、IDB annotation storeも同期済みにマーク
+        for (const [sheetName, ad] of Object.entries(annotationData)) {
+          if (ad && ad.isModified) {
+            await idbMarkAnnotationSynced(sheetName);
+          }
+          ad.isModified = false;
+        }
         hideLoading();
       } catch (error) {
         console.error('Save error:', error);
@@ -7605,7 +8187,13 @@
 
         hasUnsavedChanges = false;
         photoData.forEach(p => p.isModified = false);
-        Object.values(annotationData).forEach(ad => ad.isModified = false);
+        // Excel保存完了後、IDB annotation storeも同期済みにマーク
+        for (const [sheetName, ad] of Object.entries(annotationData)) {
+          if (ad && ad.isModified) {
+            await idbMarkAnnotationSynced(sheetName);
+          }
+          ad.isModified = false;
+        }
         hideLoading();
       } catch (error) {
         console.error('Save error:', error);
@@ -7633,6 +8221,72 @@
         hideLoading();
       } finally {
         isSaving = false;
+      }
+    }
+
+    // 写真一括ダウンロード（最終保険）
+    // IDB photos store の全写真を ZIP にまとめてダウンロード
+    async function downloadAllPhotosAsZip() {
+      showLoading('Packaging photos...');
+      try {
+        const stored = await idbLoadPhotos();
+        // メモリの photoData からも写真を集める (IDBに無い分の保険)
+        const memPhotos = (photoData || []).filter(p => p.imageBase64);
+
+        if (stored.length === 0 && memPhotos.length === 0) {
+          hideLoading();
+          alert('No photos to download');
+          return;
+        }
+
+        const zip = new JSZip();
+        const seen = new Set();
+        let count = 0;
+
+        // IDBから優先（rawBlobがあれば元画質で保存）
+        for (const rec of stored) {
+          const label = rec.key.split('::').pop();
+          const filename = rec.rawFilename || `photo_${label}.jpg`;
+          if (seen.has(filename)) continue;
+          seen.add(filename);
+          if (rec.rawBlob) {
+            zip.file(filename, rec.rawBlob);
+          } else if (rec.dataUrl) {
+            const m = rec.dataUrl.match(/^data:image\/\w+;base64,(.+)$/);
+            if (m) zip.file(filename, m[1], { base64: true });
+          }
+          count++;
+        }
+
+        // メモリ側でIDBに無いものを追加
+        for (const p of memPhotos) {
+          const filename = p.filename || `photo_${p.label}.jpg`;
+          if (seen.has(filename)) continue;
+          seen.add(filename);
+          const m = p.imageBase64.match(/^data:image\/\w+;base64,(.+)$/);
+          if (m) {
+            zip.file(filename, m[1], { base64: true });
+            count++;
+          }
+        }
+
+        if (count === 0) {
+          hideLoading();
+          alert('No photos to download');
+          return;
+        }
+
+        const blob = await zip.generateAsync({ type: 'blob' });
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const baseName = (currentFileName || 'karte').replace(/\.xlsx$/i, '');
+        const zipName = `photos_${baseName}_${ts}.zip`;
+        downloadBlob(blob, zipName);
+        hideLoading();
+        setStatus(`${count} photos zipped`, zipName);
+      } catch (err) {
+        console.error('Photos ZIP failed:', err);
+        hideLoading();
+        alert('Failed to create photos ZIP: ' + err.message);
       }
     }
 
@@ -7677,7 +8331,13 @@
 
           hasUnsavedChanges = false;
           photoData.forEach(p => p.isModified = false);
-          Object.values(annotationData).forEach(ad => ad.isModified = false);
+          // Excel保存完了後、IDB annotation storeも同期済みにマーク
+          for (const [sheetName, ad] of Object.entries(annotationData)) {
+            if (ad && ad.isModified) {
+              await idbMarkAnnotationSynced(sheetName);
+            }
+            ad.isModified = false;
+          }
           setStatus('Saved As', currentFileName);
           hideLoading();
         } catch (err) {
