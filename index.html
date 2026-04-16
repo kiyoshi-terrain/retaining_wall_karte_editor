@@ -5579,8 +5579,12 @@
 
       // Enhanced pressure range: 0.2x ~ 1.5x (wider than old 0.5x ~ 1.5x)
       function pressureWidth(i) {
-        // 筆圧マッピング: 軽いタッチ→極細、強く押す→太い (range 0.1x〜2.0x)
-        return lw * (0.1 + smoothPressure(i) * 1.9);
+        // 筆圧マッピング: sqrt カーブで軽い筆圧でも自然な太さが出る
+        //   pressure=0 → 0.4x,  pressure=0.3 → 0.78x,  pressure=0.5 → 0.94x
+        //   pressure=0.7 → 1.07x,  pressure=1.0 → 1.2x
+        //   Normal(lw=3) の中間筆圧 ≈ 2.8px (自然な太さ)
+        const p = smoothPressure(i);
+        return lw * (0.4 + Math.sqrt(p) * 0.8);
       }
 
       if (pts.length === 2) {
@@ -5641,8 +5645,12 @@
         return prev * 0.3 + cur * 0.7;
       }
       function pressureWidth(i) {
-        // 筆圧マッピング: 軽いタッチ→極細、強く押す→太い (range 0.1x〜2.0x)
-        return lw * (0.1 + smoothPressure(i) * 1.9);
+        // 筆圧マッピング: sqrt カーブで軽い筆圧でも自然な太さが出る
+        //   pressure=0 → 0.4x,  pressure=0.3 → 0.78x,  pressure=0.5 → 0.94x
+        //   pressure=0.7 → 1.07x,  pressure=1.0 → 1.2x
+        //   Normal(lw=3) の中間筆圧 ≈ 2.8px (自然な太さ)
+        const p = smoothPressure(i);
+        return lw * (0.4 + Math.sqrt(p) * 0.8);
       }
 
       drawingCtx.save();
