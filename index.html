@@ -6864,10 +6864,10 @@
         sheetXml = writeInlineStringCell(sheetXml, commentRef, commentText);
 
         // B. 新規画像
-        if (photo.imageBase64) {
+        if (photo.imageBase64 && !photo.imageBase64.startsWith('blob:')) {
           const match = photo.imageBase64.match(/^data:image\/(\w+);base64,(.+)$/);
           if (!match) {
-            console.warn(`画像データ不正: ${photo.label}`);
+            console.warn(`[delta-save] 画像データ不正 (想定外の形式): ${photo.label}`, photo.imageBase64.substring(0, 60));
             continue;
           }
           const ext = match[1] === 'jpg' ? 'jpeg' : match[1];
@@ -6938,6 +6938,8 @@
           compression: 'DEFLATE',
           compressionOptions: { level: 6 }
         });
+        // 次回のdelta saveが今回の変更を含むように原本バッファを更新
+        originalZipBuffer = buffer.slice(0);
       } else {
         // 変更なし: 原本バイトをそのまま使用 (暗号化処理は共通)
         buffer = originalZipBuffer.slice(0);
@@ -7024,7 +7026,7 @@
       }
 
       for (const photo of photoData) {
-        if (photo.isModified && photo.imageBase64) {
+        if (photo.isModified && photo.imageBase64 && !photo.imageBase64.startsWith('blob:')) {
           const match = photo.imageBase64.match(/^data:image\/(\w+);base64,(.+)$/);
           if (!match) continue;
 
