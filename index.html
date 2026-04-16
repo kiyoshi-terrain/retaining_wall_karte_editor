@@ -6786,27 +6786,64 @@
     }
 
     // ヘルパー: シート XML 内の特定セルの値を書き換え or 追加 (inline string として)
-    //   既存セルがあれば value 要素を差し替え、無ければ該当 row に追記
+    //   既存セルがあれば value 要素を差し替え（スタイル属性 s="..." を保持）、無ければ該当 row に列順序で挿入
     function writeInlineStringCell(sheetXml, cellRef, text) {
       const rowMatch = cellRef.match(/^([A-Z]+)(\d+)$/);
       if (!rowMatch) return sheetXml;
+      const colLetters = rowMatch[1];
       const rowNum = rowMatch[2];
       const xmlText = escapeXml(text);
-      const newCell = `<c r="${cellRef}" t="inlineStr"><is><t xml:space="preserve">${xmlText}</t></is></c>`;
 
-      // 既存の <c r="X"> があれば置換
-      const cellRe = new RegExp(`<c r="${cellRef}"[^/]*?(?:\\/>|>[\\s\\S]*?<\\/c>)`);
-      if (cellRe.test(sheetXml)) {
+      // 既存の <c r="X"> があれば置換（スタイル属性を保持）
+      const cellRe = new RegExp(`<c r="${cellRef}"([^/]*?)(?:\\/>|>[\\s\\S]*?<\\/c>)`);
+      const existingMatch = sheetXml.match(cellRe);
+      if (existingMatch) {
+        const attrs = existingMatch[1];
+        // s="..." 属性を抽出して保持、t="..." は inlineStr に差し替え
+        const styleMatch = attrs.match(/\s+s="(\d+)"/);
+        const styleAttr = styleMatch ? ` s="${styleMatch[1]}"` : '';
+        const newCell = `<c r="${cellRef}"${styleAttr} t="inlineStr"><is><t xml:space="preserve">${xmlText}</t></is></c>`;
         return sheetXml.replace(cellRe, newCell);
       }
-      // 該当 row があれば末尾に追加
+
+      // セルが存在しない場合: 列順序を維持して挿入
+      const newCell = `<c r="${cellRef}" t="inlineStr"><is><t xml:space="preserve">${xmlText}</t></is></c>`;
+      const colIndex = colLettersToIndex(colLetters);
+
+      // 該当 row があれば列順序を守って挿入
       const rowRe = new RegExp(`(<row[^>]*r="${rowNum}"[^>]*>)([\\s\\S]*?)(<\\/row>)`);
       const rowMatch2 = sheetXml.match(rowRe);
       if (rowMatch2) {
-        return sheetXml.replace(rowRe, `$1$2${newCell}$3`);
+        const rowOpen = rowMatch2[1];
+        const rowContent = rowMatch2[2];
+        const rowClose = rowMatch2[3];
+        // 行内の全セルをスキャンして挿入位置を探す
+        const cellsInRow = [...rowContent.matchAll(/<c r="([A-Z]+)\d+"[^/]*?(?:\/>|>[\s\S]*?<\/c>)/g)];
+        let insertBefore = null;
+        for (const cm of cellsInRow) {
+          const existCol = colLettersToIndex(cm[1]);
+          if (existCol > colIndex) {
+            insertBefore = cm.index;
+            break;
+          }
+        }
+        if (insertBefore !== null) {
+          const newContent = rowContent.substring(0, insertBefore) + newCell + rowContent.substring(insertBefore);
+          return sheetXml.replace(rowRe, `${rowOpen}${newContent}${rowClose}`);
+        }
+        return sheetXml.replace(rowRe, `${rowOpen}${rowContent}${newCell}${rowClose}`);
       }
       // row も無いなら <sheetData> の末尾に新規 row 追加
       return sheetXml.replace('</sheetData>', `<row r="${rowNum}">${newCell}</row></sheetData>`);
+    }
+
+    // 列文字列→0-basedインデックス変換 (A→0, B→1, ..., Z→25, AA→26, ...)
+    function colLettersToIndex(letters) {
+      let idx = 0;
+      for (let i = 0; i < letters.length; i++) {
+        idx = idx * 26 + (letters.charCodeAt(i) - 64);
+      }
+      return idx;
     }
 
     // ヘルパー: シート XML 内の特定セルの値だけクリア (セル自体は残す)
