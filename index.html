@@ -4448,17 +4448,23 @@
           });
 
           if (allSameCol && figImages.length >= 3) {
-            // 縦連結モード: 損傷図のような独立ページを row 順に上から並べる
-            stackFigImagesVertically(figImages, (stackedUrl) => {
-              annotationData[sheetName] = {
-                backgroundDataUrl: stackedUrl,
-                drawingDataUrl: null,
-                compositeDataUrl: null,
-                isModified: false,
-                originalImages: figImages,
-              };
-              renderFigSheetUI(sheet, sheetName);
+            // ページ分割モード: 損傷図のような独立ページを個別表示 + ページ切替
+            const sortedPages = [...figImages].sort((a, b) => {
+              const ra = a.range?.tl?.nativeRow ?? a.range?.tl?.row ?? 0;
+              const rb = b.range?.tl?.nativeRow ?? b.range?.tl?.row ?? 0;
+              return ra - rb;
             });
+            annotationData[sheetName] = {
+              backgroundDataUrl: sortedPages[0].dataUrl, // 初期表示は1ページ目
+              drawingDataUrl: null,
+              compositeDataUrl: null,
+              isModified: false,
+              originalImages: figImages,
+              pages: sortedPages,       // ページ配列
+              currentPage: 0,           // 現在のページ番号
+              pageDrawings: {},         // { pageIdx: drawingDataUrl } ページ別手書きデータ
+            };
+            renderFigSheetUI(sheet, sheetName);
             return;
           }
 
@@ -4636,9 +4642,26 @@
         extraHtml += '</div>';
       }
 
+      // ★ ページ分割表示 (損傷図等)
+      let pageNavHtml = '';
+      if (ad.pages && ad.pages.length > 1) {
+        const total = ad.pages.length;
+        const current = ad.currentPage || 0;
+        pageNavHtml = `
+          <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:16px;">
+            <button class="btn" onclick="figPageNav('${escapeHtml(sheetName)}', -1)"
+                    style="padding:8px 16px;${current === 0 ? 'opacity:0.3;pointer-events:none;' : ''}">&lt; Prev</button>
+            <span style="color:#e0e0e0;font-weight:600;font-size:16px;">Page ${current + 1} / ${total}</span>
+            <button class="btn" onclick="figPageNav('${escapeHtml(sheetName)}', 1)"
+                    style="padding:8px 16px;${current === total - 1 ? 'opacity:0.3;pointer-events:none;' : ''}"">Next &gt;</button>
+          </div>
+        `;
+      }
+
       photoGrid.innerHTML = `
         <div class="fig-sheet-container">
           <h3 style="color: #00a84f; margin-bottom: 16px;">${escapeHtml(sheet.name)}</h3>
+          ${pageNavHtml}
           ${displayImage
             ? `<img class="fig-sheet-preview" src="${displayImage}" alt="${escapeHtml(sheet.name)}">
                <div class="fig-sheet-actions">
@@ -4654,6 +4677,32 @@
       `;
 
       hideLoading();
+    }
+
+    // ページ切替 (損傷図等)
+    function figPageNav(sheetName, delta) {
+      const ad = annotationData[sheetName];
+      if (!ad || !ad.pages) return;
+
+      // 現在ページの手書きデータを退避
+      if (ad.drawingDataUrl) {
+        if (!ad.pageDrawings) ad.pageDrawings = {};
+        ad.pageDrawings[ad.currentPage] = ad.drawingDataUrl;
+      }
+
+      // ページ移動
+      const newPage = Math.max(0, Math.min(ad.pages.length - 1, (ad.currentPage || 0) + delta));
+      ad.currentPage = newPage;
+      ad.backgroundDataUrl = ad.pages[newPage].dataUrl;
+
+      // 移動先ページの手書きデータを復元
+      ad.drawingDataUrl = ad.pageDrawings?.[newPage] || null;
+      ad.compositeDataUrl = null; // 再合成を促す
+
+      // 再描画 (compositeDataUrl を null にしたので backgroundDataUrl が表示される。
+      //   手書きデータがある場合は openDrawingModal 時に復元される)
+      const sheet = workbook.getWorksheet(sheetName);
+      renderFigSheetUI(sheet, sheetName);
     }
 
     // 汎用シート表示
