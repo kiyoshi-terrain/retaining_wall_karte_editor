@@ -1894,9 +1894,10 @@
     // IndexedDB ローカル保存（ダウンロードバーなし）
     // ============================
     const IDB_NAME = 'RetainingWallKarteDB';
-    const IDB_VERSION = 2;
+    const IDB_VERSION = 3;
     const IDB_STORE = 'files';
     const IDB_PHOTO_STORE = 'photos';
+    const IDB_ANNOTATION_STORE = 'annotations';
 
     function openIDB() {
       return new Promise((resolve, reject) => {
@@ -1908,6 +1909,9 @@
           }
           if (!db.objectStoreNames.contains(IDB_PHOTO_STORE)) {
             db.createObjectStore(IDB_PHOTO_STORE, { keyPath: 'key' });
+          }
+          if (!db.objectStoreNames.contains(IDB_ANNOTATION_STORE)) {
+            db.createObjectStore(IDB_ANNOTATION_STORE, { keyPath: 'key' });
           }
         };
         req.onsuccess = () => resolve(req.result);
@@ -1986,6 +1990,82 @@
         });
       } catch (err) {
         console.warn('idbMarkPhotoUploaded failed:', err);
+      }
+    }
+
+    // ============================
+    // IDB Annotation Store（Add memo/手書き）
+    // ============================
+    function annotationStoreKey(sheetName) {
+      return (currentFileName || '_unsaved') + '::' + sheetName;
+    }
+
+    async function idbSaveAnnotation(sheetName, annotationObj) {
+      try {
+        const db = await openIDB();
+        const tx = db.transaction(IDB_ANNOTATION_STORE, 'readwrite');
+        const store = tx.objectStore(IDB_ANNOTATION_STORE);
+        store.put({
+          key: annotationStoreKey(sheetName),
+          sheetName: sheetName,
+          drawingDataUrl: annotationObj.drawingDataUrl || null,
+          compositeDataUrl: annotationObj.compositeDataUrl || null,
+          drawObjects: annotationObj.drawObjects || [],
+          isModified: annotationObj.isModified || false,
+          isStickyNote: annotationObj.isStickyNote || false,
+          parentSheet: annotationObj.parentSheet || null,
+          originalImages: annotationObj.originalImages || [],
+          savedAt: new Date().toISOString(),
+        });
+        await new Promise((resolve, reject) => {
+          tx.oncomplete = () => { db.close(); resolve(); };
+          tx.onerror = () => { db.close(); reject(tx.error); };
+        });
+      } catch (err) {
+        console.warn('idbSaveAnnotation failed:', err);
+      }
+    }
+
+    async function idbLoadAnnotations() {
+      try {
+        const prefix = (currentFileName || '_unsaved') + '::';
+        const db = await openIDB();
+        const tx = db.transaction(IDB_ANNOTATION_STORE, 'readonly');
+        const store = tx.objectStore(IDB_ANNOTATION_STORE);
+        const all = await new Promise((resolve, reject) => {
+          const req = store.getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => reject(req.error);
+        });
+        db.close();
+        return all.filter(r => r.key.startsWith(prefix));
+      } catch (err) {
+        console.warn('idbLoadAnnotations failed:', err);
+        return [];
+      }
+    }
+
+    async function idbMarkAnnotationSynced(sheetName) {
+      try {
+        const db = await openIDB();
+        const tx = db.transaction(IDB_ANNOTATION_STORE, 'readwrite');
+        const store = tx.objectStore(IDB_ANNOTATION_STORE);
+        const key = annotationStoreKey(sheetName);
+        const existing = await new Promise((resolve, reject) => {
+          const req = store.get(key);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        if (existing) {
+          existing.isModified = false;
+          store.put(existing);
+        }
+        await new Promise((resolve, reject) => {
+          tx.oncomplete = () => { db.close(); resolve(); };
+          tx.onerror = () => { db.close(); reject(tx.error); };
+        });
+      } catch (err) {
+        console.warn('idbMarkAnnotationSynced failed:', err);
       }
     }
 
@@ -2554,7 +2634,13 @@
 
         hasUnsavedChanges = false;
         photoData.forEach(p => p.isModified = false);
-        Object.values(annotationData).forEach(ad => ad.isModified = false);
+        // Excel保存完了後、IDB annotation storeも同期済みにマーク
+        for (const [sheetName, ad] of Object.entries(annotationData)) {
+          if (ad && ad.isModified) {
+            await idbMarkAnnotationSynced(sheetName);
+          }
+          ad.isModified = false;
+        }
         // GDrive保存成功 → リトライキューをドレイン（前回失敗分を再送）
         drainDriveRetryQueue();
         hideLoading();
@@ -4287,6 +4373,8 @@
 
       // IDB写真ストアから欠落分を復元
       restorePhotosFromIDB();
+      // IDB annotation ストアから欠落分を復元
+      await restoreAnnotationsFromIDB();
 
       renderPhotoGrid();
       updateStats();
@@ -4467,6 +4555,8 @@
 
       // IDB写真ストアから欠落分を復元
       restorePhotosFromIDB();
+      // IDB annotation ストアから欠落分を復元
+      await restoreAnnotationsFromIDB();
 
       renderPhotoGrid();
       updateStats();
@@ -4499,6 +4589,39 @@
         drainDriveRetryQueue();
       } catch (err) {
         console.warn('restorePhotosFromIDB failed:', err);
+      }
+    }
+
+    async function restoreAnnotationsFromIDB() {
+      try {
+        const stored = await idbLoadAnnotations();
+        if (stored.length === 0) return;
+        let restored = 0;
+        for (const rec of stored) {
+          const sheetName = rec.sheetName;
+          if (!annotationData[sheetName]) {
+            annotationData[sheetName] = {};
+          }
+          const ad = annotationData[sheetName];
+          // 空のエントリなら復元（Excelから読み込めなかったケース）
+          if (!ad.drawingDataUrl && rec.drawingDataUrl) {
+            ad.drawingDataUrl = rec.drawingDataUrl;
+            ad.compositeDataUrl = rec.compositeDataUrl || null;
+            ad.drawObjects = rec.drawObjects || [];
+            ad.isStickyNote = rec.isStickyNote || false;
+            ad.parentSheet = rec.parentSheet || null;
+            ad.originalImages = rec.originalImages || [];
+            ad.isModified = true;
+            restored++;
+          }
+        }
+        if (restored > 0) {
+          console.log(`[IDB restore] ${restored} annotations recovered from local backup`);
+          setStatus(`${restored} annotations restored from backup`, '');
+          hasUnsavedChanges = true;
+        }
+      } catch (err) {
+        console.warn('restoreAnnotationsFromIDB failed:', err);
       }
     }
 
@@ -6418,6 +6541,9 @@
       annotationData[sheetName].isModified = true;
       hasUnsavedChanges = true;
 
+      // IDB即時バックアップ（Excel保存が失敗しても復旧可能）
+      idbSaveAnnotation(sheetName, annotationData[sheetName]);
+
       closeDrawingModal();
 
       // 付箋メモの場合は親シートを、per-image keyの場合は実シートを再描画
@@ -7528,7 +7654,13 @@
 
         hasUnsavedChanges = false;
         photoData.forEach(p => p.isModified = false);
-        Object.values(annotationData).forEach(ad => ad.isModified = false);
+        // Excel保存完了後、IDB annotation storeも同期済みにマーク
+        for (const [sheetName, ad] of Object.entries(annotationData)) {
+          if (ad && ad.isModified) {
+            await idbMarkAnnotationSynced(sheetName);
+          }
+          ad.isModified = false;
+        }
         hideLoading();
       } catch (error) {
         console.error('Save error:', error);
@@ -7597,7 +7729,13 @@
 
         hasUnsavedChanges = false;
         photoData.forEach(p => p.isModified = false);
-        Object.values(annotationData).forEach(ad => ad.isModified = false);
+        // Excel保存完了後、IDB annotation storeも同期済みにマーク
+        for (const [sheetName, ad] of Object.entries(annotationData)) {
+          if (ad && ad.isModified) {
+            await idbMarkAnnotationSynced(sheetName);
+          }
+          ad.isModified = false;
+        }
         hideLoading();
       } catch (error) {
         console.error('Save error:', error);
@@ -7669,7 +7807,13 @@
 
           hasUnsavedChanges = false;
           photoData.forEach(p => p.isModified = false);
-          Object.values(annotationData).forEach(ad => ad.isModified = false);
+          // Excel保存完了後、IDB annotation storeも同期済みにマーク
+          for (const [sheetName, ad] of Object.entries(annotationData)) {
+            if (ad && ad.isModified) {
+              await idbMarkAnnotationSynced(sheetName);
+            }
+            ad.isModified = false;
+          }
           setStatus('Saved As', currentFileName);
           hideLoading();
         } catch (err) {
