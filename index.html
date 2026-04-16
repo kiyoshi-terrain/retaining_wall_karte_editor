@@ -4411,6 +4411,31 @@
     }
 
     // 図面シート表示（fig Top / fig Side / fig Photo / comments等）
+    // per-image annotationキーからシート名を取得するヘルパー
+    function getFigParentSheet(key) {
+      const sep = key.indexOf('::fig');
+      return sep >= 0 ? key.substring(0, sep) : key;
+    }
+
+    // 画像群が空間的に分離しているかを判定
+    // （背景＋マーカーのオーバーレイではなく、別々の図が並んでいる場合にtrue）
+    function areImagesSpatiallyGrouped(figImages) {
+      if (figImages.length <= 1) return true; // 1枚以下は「まとまっている」扱い
+      let maxRowSpan = 0;
+      let globalMinRow = Infinity, globalMaxRow = -Infinity;
+      figImages.forEach(img => {
+        const tlRow = img.range.tl.nativeRow ?? img.range.tl.row ?? 0;
+        const brRow = img.range.br?.nativeRow ?? img.range.br?.row ?? (tlRow + 30);
+        const span = brRow - tlRow;
+        if (span > maxRowSpan) maxRowSpan = span;
+        if (tlRow < globalMinRow) globalMinRow = tlRow;
+        if (brRow > globalMaxRow) globalMaxRow = brRow;
+      });
+      const totalSpan = globalMaxRow - globalMinRow;
+      // 全体のrow幅が最大画像の1.8倍を超えたら「分離」と見なす
+      return totalSpan <= maxRowSpan * 1.8;
+    }
+
     function renderFigSheet(sheet, sheetName) {
       document.getElementById('stats').innerHTML = '';
       showLoading('Loading drawing...');
@@ -4437,8 +4462,40 @@
       });
 
       if (!annotationData[sheetName]) {
+        if (figImages.length > 1 && !areImagesSpatiallyGrouped(figImages)) {
+          // 画像が空間的に分離 → 個別表示モード
+          // row順にソート
+          figImages.sort((a, b) => {
+            const aRow = a.range.tl.nativeRow ?? a.range.tl.row ?? 0;
+            const bRow = b.range.tl.nativeRow ?? b.range.tl.row ?? 0;
+            return aRow - bRow;
+          });
+          annotationData[sheetName] = {
+            backgroundDataUrl: null,
+            drawingDataUrl: null,
+            compositeDataUrl: null,
+            isModified: false,
+            originalImages: figImages,
+            showIndividual: true,
+          };
+          // 各画像ごとのannotationエントリを作成
+          figImages.forEach((img, i) => {
+            const key = sheetName + '::fig' + i;
+            if (!annotationData[key]) {
+              annotationData[key] = {
+                backgroundDataUrl: img.dataUrl,
+                drawingDataUrl: null,
+                compositeDataUrl: null,
+                isModified: false,
+                originalImages: [img],
+              };
+            }
+          });
+          renderFigSheetUI(sheet, sheetName);
+          return;
+        }
         if (figImages.length > 1) {
-          // 複数画像（fig Photo等）: 背景+マーカーを1枚に合成
+          // 複数画像（背景+マーカー等、重なっている）: 1枚に合成
           compositeFigImages(figImages, (compositeUrl) => {
             annotationData[sheetName] = {
               backgroundDataUrl: compositeUrl,
@@ -4536,7 +4593,6 @@
     // 図面シートUI描画
     function renderFigSheetUI(sheet, sheetName) {
       const ad = annotationData[sheetName];
-      const displayImage = ad.compositeDataUrl || ad.backgroundDataUrl;
 
       // このシートに紐付く付箋メモを収集
       const sheetStickies = Object.entries(annotationData)
@@ -4555,6 +4611,37 @@
         extraHtml += '</div>';
       }
 
+      // 個別表示モード: 各画像をリスト表示
+      if (ad.showIndividual && ad.originalImages && ad.originalImages.length > 0) {
+        let imagesHtml = '';
+        ad.originalImages.forEach((img, i) => {
+          const imgKey = sheetName + '::fig' + i;
+          const imgAd = annotationData[imgKey];
+          const displayUrl = (imgAd && imgAd.compositeDataUrl) || img.dataUrl;
+          imagesHtml += `
+            <div style="margin-bottom: 24px; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 20px;">
+              <p style="color: #94a3b8; font-size: 13px; margin-bottom: 8px;">Page ${i + 1} / ${ad.originalImages.length}</p>
+              <img class="fig-sheet-preview" src="${displayUrl}" alt="Page ${i + 1}">
+              <div class="fig-sheet-actions">
+                <button class="btn-annotate" onclick="openDrawingModal('${escapeHtml(imgKey)}')">
+                  [/] Add memo
+                </button>
+              </div>
+            </div>`;
+        });
+        photoGrid.innerHTML = `
+          <div class="fig-sheet-container">
+            <h3 style="color: #00a84f; margin-bottom: 16px;">${escapeHtml(sheet.name)}</h3>
+            ${imagesHtml}
+            ${extraHtml}
+          </div>
+        `;
+        hideLoading();
+        return;
+      }
+
+      // 通常モード: 合成画像 or 単一画像
+      const displayImage = ad.compositeDataUrl || ad.backgroundDataUrl;
       photoGrid.innerHTML = `
         <div class="fig-sheet-container">
           <h3 style="color: #00a84f; margin-bottom: 16px;">${escapeHtml(sheet.name)}</h3>
@@ -6099,9 +6186,9 @@
 
     function openStickyFromModal() {
       const currentSheet = drawingCanvas.dataset.sheetName;
-      // 付箋の親シートを特定（既に付箋の場合はその親シート）
+      // 付箋の親シートを特定（既に付箋の場合はその親シート、per-imageキーの場合は実シート名）
       const ad = annotationData[currentSheet];
-      const parentSheet = (ad && ad.isStickyNote) ? ad.parentSheet : currentSheet;
+      const parentSheet = (ad && ad.isStickyNote) ? ad.parentSheet : getFigParentSheet(currentSheet);
 
       // 現在のモーダルを閉じてから付箋を開く
       closeDrawingModal();
@@ -6190,9 +6277,9 @@
 
       closeDrawingModal();
 
-      // 付箋メモの場合は親シートを再描画
+      // 付箋メモの場合は親シートを、per-image keyの場合は実シートを再描画
       const ad = annotationData[sheetName];
-      const renderSheet = ad.isStickyNote ? ad.parentSheet : sheetName;
+      const renderSheet = ad.isStickyNote ? ad.parentSheet : getFigParentSheet(sheetName);
       renderFigSheet(workbook.getWorksheet(renderSheet), renderSheet);
       setStatus(ad.isStickyNote ? 'Sticky note saved' : 'Annotation saved', renderSheet);
     }
@@ -7010,8 +7097,11 @@
       // 手書き線のみの透過PNGを元画像と同座標に重ねる
       for (const [sheetName, ad] of Object.entries(annotationData)) {
         if (!ad.isModified || !ad.drawingDataUrl) continue;
+        if (ad.showIndividual) continue; // 親エントリはスキップ（個別画像エントリで処理）
 
-        const figSheet = workbook.getWorksheet(sheetName);
+        // per-image key (e.g. "損傷図 (2)::fig0") → 実シート名を取得
+        const realSheetName = getFigParentSheet(sheetName);
+        const figSheet = workbook.getWorksheet(realSheetName);
         if (!figSheet) continue;
 
         const match = ad.drawingDataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
