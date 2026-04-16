@@ -4438,7 +4438,31 @@
 
       if (!annotationData[sheetName]) {
         if (figImages.length > 1) {
-          // 複数画像（fig Photo等）: 背景+マーカーを1枚に合成
+          // 損傷図(2) のような縦に並ぶ独立ページ図面か、
+          // fig Photo のような背景+マーカー重ねかを判定
+          // → 画像が縦に並んでいる (全画像が同じ列グループに属する) なら縦連結
+          const allSameCol = figImages.every(img => {
+            const c = img.range?.tl?.nativeCol ?? img.range?.tl?.col ?? 0;
+            const c0 = figImages[0].range?.tl?.nativeCol ?? figImages[0].range?.tl?.col ?? 0;
+            return Math.abs(c - c0) < 5;
+          });
+
+          if (allSameCol && figImages.length >= 3) {
+            // 縦連結モード: 損傷図のような独立ページを row 順に上から並べる
+            stackFigImagesVertically(figImages, (stackedUrl) => {
+              annotationData[sheetName] = {
+                backgroundDataUrl: stackedUrl,
+                drawingDataUrl: null,
+                compositeDataUrl: null,
+                isModified: false,
+                originalImages: figImages,
+              };
+              renderFigSheetUI(sheet, sheetName);
+            });
+            return;
+          }
+
+          // 従来モード: 背景+マーカー重ね (fig Photo等)
           compositeFigImages(figImages, (compositeUrl) => {
             annotationData[sheetName] = {
               backgroundDataUrl: compositeUrl,
@@ -4460,6 +4484,63 @@
         };
       }
       renderFigSheetUI(sheet, sheetName);
+    }
+
+    // 独立ページ画像を row 順に縦連結して1枚の長い画像にする (損傷図等)
+    function stackFigImagesVertically(figImages, callback) {
+      // row 順にソート
+      const sorted = [...figImages].sort((a, b) => {
+        const ra = a.range?.tl?.nativeRow ?? a.range?.tl?.row ?? 0;
+        const rb = b.range?.tl?.nativeRow ?? b.range?.tl?.row ?? 0;
+        return ra - rb;
+      });
+
+      // 全画像をロード
+      const imgs = [];
+      let loaded = 0;
+      sorted.forEach((fig, i) => {
+        const img = new Image();
+        img.onload = () => {
+          imgs[i] = img;
+          loaded++;
+          if (loaded === sorted.length) combine();
+        };
+        img.onerror = () => {
+          imgs[i] = null;
+          loaded++;
+          if (loaded === sorted.length) combine();
+        };
+        img.src = fig.dataUrl;
+      });
+
+      function combine() {
+        const validImgs = imgs.filter(Boolean);
+        if (validImgs.length === 0) { callback(null); return; }
+
+        // 最大幅に揃え、各画像をアスペクト比保持でスケール
+        const maxW = Math.max(...validImgs.map(i => i.naturalWidth));
+        let totalH = 0;
+        const scaled = validImgs.map(img => {
+          const scale = maxW / img.naturalWidth;
+          const h = Math.round(img.naturalHeight * scale);
+          totalH += h;
+          return { img, w: maxW, h };
+        });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = maxW;
+        canvas.height = totalH;
+        const ctx = canvas.getContext('2d');
+
+        let y = 0;
+        for (const { img, w, h } of scaled) {
+          ctx.drawImage(img, 0, y, w, h);
+          y += h;
+        }
+
+        console.log(`[stackFigImages] ${validImgs.length} pages → ${maxW}x${totalH}`);
+        callback(canvas.toDataURL('image/png'));
+      }
     }
 
     // 複数画像を1枚に合成（背景+マーカー）
