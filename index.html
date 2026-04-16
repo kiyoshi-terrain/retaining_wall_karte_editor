@@ -6609,43 +6609,64 @@
     //     - 列グループは 21 列幅 (labelCol-1 が左端)
     //     - アスペクト比に応じて列スパンを調整し、グループ内で中央寄せ
     //     - 行は labelRow-1 から下方向に 22 行分を確保 (コメント行=labelRow+24 手前)
-    function buildTwoCellAnchor(photo, rId, picId) {
-      // テンプレの既存 anchor パターンを踏襲:
-      //   横写真 (4:3) はグループ先頭+1 から +19 あたりまで 18 列幅で配置、
-      //   グループ先頭 1 列と末尾 2 列を視覚的な余白として残す。
-      //   縦写真/ほぼ正方形はその 18 列内でアスペクト比を保ちつつ中央寄せ。
-      const imageRegion = 18;       // テンプレ標準の画像幅 (landscape 4:3 想定)
-      const leftMargin = 1;         // グループ先頭から何列空けるか (テンプレ踏襲)
-      const maxRows = 22;
-      const baseAspect = 4 / 3;
-      const groupStart = photo.labelCol - 1; // 画像セル列 (0-indexed, B/W/AR)
-      // 画像セル列は実はグループ先頭+1 なので、groupStart は既に leftMargin 分加味済み
-      // → fromColBase = groupStart で 18 列を展開する
+    function buildImageAnchor(photo, rId, picId) {
+      // oneCellAnchor + <xdr:ext cx cy> で物理寸法を EMU で直接指定。
+      // twoCellAnchor は from/to の矩形に画像を引き伸ばすため、
+      // アスペクト比が異なる画像（特にポートレート）を歪めてしまう。
+      //
+      // テンプレの既存パターン (landscape 4:3):
+      //   from col=1..19 (18 cols) × row span ~22 rows
+      //   col width ≈ 304000 EMU (実測: 18 cols + 242470 colOff ≈ 5715000 EMU = 4/3 × 22 rows × 190500)
+      //   row height ≈ 190500 EMU (= 15pt standard)
+      //
+      // EMU 定数 (テンプレ実測値ベース)
+      const COL_EMU = 304000;   // 1 列の物理幅 (EMU)
+      const ROW_EMU = 190500;   // 1 行の物理高さ (EMU)
+      const FRAME_COLS = 18;    // テンプレ標準の画像フレーム幅 (列数)
+      const FRAME_ROWS = 22;    // テンプレ標準の画像フレーム高さ (行数)
+      const MAX_CX = FRAME_COLS * COL_EMU + 242470;  // ≈ 5714470 EMU
+      const MAX_CY = FRAME_ROWS * ROW_EMU;            // = 4191000 EMU
+      const groupStart = photo.labelCol - 1; // 画像セル列 (0-indexed)
 
-      let colSpanF = imageRegion;
+      // 画像の物理サイズ (フレーム内にフィットし、アスペクト比保持)
+      let cx, cy;
       if (photo.imageWidth && photo.imageHeight) {
-        const aspect = photo.imageWidth / photo.imageHeight;
-        colSpanF = imageRegion * (aspect / baseAspect);
-        // 下限 6 列・上限 imageRegion 列にクランプ
-        colSpanF = Math.min(imageRegion, Math.max(6, colSpanF));
+        const imgAspect = photo.imageWidth / photo.imageHeight;
+        const frameAspect = MAX_CX / MAX_CY;
+        if (imgAspect >= frameAspect) {
+          // 横に広い画像 → 幅をフレームいっぱいに
+          cx = MAX_CX;
+          cy = Math.round(MAX_CX / imgAspect);
+        } else {
+          // 縦に長い画像 → 高さをフレームいっぱいに
+          cy = MAX_CY;
+          cx = Math.round(MAX_CY * imgAspect);
+        }
+      } else {
+        // サイズ不明 → テンプレ標準 (landscape 4:3 枠いっぱい)
+        cx = MAX_CX;
+        cy = MAX_CY;
       }
-      // imageRegion 内で中央寄せ
-      const colOffsetF = (imageRegion - colSpanF) / 2;
-      const fromCol = Math.round(groupStart + colOffsetF);
-      const toCol = Math.round(groupStart + colOffsetF + colSpanF);
-      const fromRow = photo.labelRow - 1;
-      const toRow = fromRow + maxRows;
+
+      // フレーム内で中央寄せ (from 位置のオフセット計算)
+      const offsetX = Math.round((MAX_CX - cx) / 2); // 水平余白
+      const offsetY = Math.round((MAX_CY - cy) / 2); // 垂直余白
+
+      // EMU offset → (col, colOff) に変換
+      const fromCol = groupStart + Math.floor(offsetX / COL_EMU);
+      const fromColOff = offsetX % COL_EMU;
+      const fromRow = (photo.labelRow - 1) + Math.floor(offsetY / ROW_EMU);
+      const fromRowOff = offsetY % ROW_EMU;
 
       const aspectStr = photo.imageWidth && photo.imageHeight
-        ? (photo.imageWidth/photo.imageHeight).toFixed(2) : '?';
-      console.log(`[delta-save] anchor ${photo.label}: ${photo.imageWidth}x${photo.imageHeight} aspect=${aspectStr} span=${(toCol-fromCol)} [${fromCol}..${toCol}] (imageCell=${groupStart})`);
+        ? (photo.imageWidth / photo.imageHeight).toFixed(2) : '?';
+      console.log(`[delta-save] anchor ${photo.label}: ${photo.imageWidth || '?'}x${photo.imageHeight || '?'} aspect=${aspectStr} cx=${cx} cy=${cy} → col${fromCol}+${fromColOff} row${fromRow}+${fromRowOff}`);
 
       return (
-        `<xdr:twoCellAnchor editAs="oneCell">` +
-          `<xdr:from><xdr:col>${fromCol}</xdr:col><xdr:colOff>0</xdr:colOff>` +
-                    `<xdr:row>${fromRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>` +
-          `<xdr:to><xdr:col>${toCol}</xdr:col><xdr:colOff>0</xdr:colOff>` +
-                  `<xdr:row>${toRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>` +
+        `<xdr:oneCellAnchor>` +
+          `<xdr:from><xdr:col>${fromCol}</xdr:col><xdr:colOff>${fromColOff}</xdr:colOff>` +
+                    `<xdr:row>${fromRow}</xdr:row><xdr:rowOff>${fromRowOff}</xdr:rowOff></xdr:from>` +
+          `<xdr:ext cx="${cx}" cy="${cy}"/>` +
           `<xdr:pic>` +
             `<xdr:nvPicPr>` +
               `<xdr:cNvPr id="${picId}" name="Picture ${picId}" descr="${escapeXml(photo.filename || photo.label)}"/>` +
@@ -6656,12 +6677,12 @@
               `<a:stretch xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:fillRect/></a:stretch>` +
             `</xdr:blipFill>` +
             `<xdr:spPr>` +
-              `<a:xfrm xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>` +
+              `<a:xfrm xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
               `<a:prstGeom prst="rect" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:avLst/></a:prstGeom>` +
             `</xdr:spPr>` +
           `</xdr:pic>` +
           `<xdr:clientData/>` +
-        `</xdr:twoCellAnchor>`
+        `</xdr:oneCellAnchor>`
       );
     }
 
@@ -6798,7 +6819,7 @@
           drawingRelsXml = drawingRelsXml.replace('</Relationships>', `${newRel}</Relationships>`);
 
           // 4. drawing xml に twoCellAnchor 追加
-          const anchorXml = buildTwoCellAnchor(photo, newRId, nextPicId);
+          const anchorXml = buildImageAnchor(photo, newRId, nextPicId);
           nextPicId++;
           drawingXml = drawingXml.replace(/<\/xdr:wsDr>/, `${anchorXml}</xdr:wsDr>`);
 
