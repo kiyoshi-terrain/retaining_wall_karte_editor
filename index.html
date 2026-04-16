@@ -5236,13 +5236,14 @@
         }
 
         // ★ 予測イベント: Apple Pencil の予測ポイントで先行描画 (体感遅延低減)
+        //   alpha=0.15 で薄く描画、次の full render (rAF) で clearRect されて消える
         if (e.getPredictedEvents && activeStroke && activeStroke.type === 'pen') {
           const predicted = e.getPredictedEvents();
           if (predicted.length > 0) {
             drawingCtx.save();
-            drawingCtx.globalAlpha = 0.4;
+            drawingCtx.globalAlpha = 0.15;
             drawingCtx.strokeStyle = activeStroke.color;
-            drawingCtx.lineWidth = activeStroke.lineWidth;
+            drawingCtx.lineWidth = activeStroke.lineWidth * 0.8;
             drawingCtx.lineCap = 'round';
             drawingCtx.lineJoin = 'round';
             const lastPt = activeStroke.points[activeStroke.points.length - 1];
@@ -5503,21 +5504,15 @@
     function renderDrawingObjects() {
       if (!drawingCtx || !drawingCanvas) return;
       const dpr = window.devicePixelRatio || 1;
-      const w = drawingCanvas.width / dpr;
-      const h = drawingCanvas.height / dpr;
-      // ★ DPR 対応: save/restore で scale(dpr) を維持しつつ clearRect は論理座標
-      drawingCtx.save();
-      drawingCtx.setTransform(1, 0, 0, 1, 0, 0);
-      drawingCtx.clearRect(0, 0, drawingCanvas.width, drawingCanvas.height);
-      drawingCtx.restore();
+      const logicalW = drawingCanvas.width / dpr;
+      const logicalH = drawingCanvas.height / dpr;
+      // ctx は scale(dpr) 済みなので clearRect は論理座標
+      drawingCtx.clearRect(0, 0, logicalW, logicalH);
 
-      // 1. キャッシュ描画 (キャッシュも DPR 倍なので論理座標で描画)
+      // 1. キャッシュ描画 (キャッシュも DPR 倍 → 論理座標で drawImage)
       if (!cacheValid) rebuildCache();
       if (cacheCanvas) {
-        drawingCtx.save();
-        drawingCtx.setTransform(1, 0, 0, 1, 0, 0);
-        drawingCtx.drawImage(cacheCanvas, 0, 0);
-        drawingCtx.restore();
+        drawingCtx.drawImage(cacheCanvas, 0, 0, logicalW, logicalH);
       }
 
       // 2. アクティブストローク描画
@@ -5533,11 +5528,13 @@
     function rebuildCache() {
       if (!cacheCanvas) cacheCanvas = document.createElement('canvas');
       const dpr = window.devicePixelRatio || 1;
-      cacheCanvas.width = drawingCanvas.width;   // 既に DPR 倍
+      cacheCanvas.width = drawingCanvas.width;   // DPR 倍の物理ピクセル
       cacheCanvas.height = drawingCanvas.height;
       cacheCtx = cacheCanvas.getContext('2d');
-      cacheCtx.scale(dpr, dpr);  // ★ DPR 対応: 座標系は元サイズのまま
-      cacheCtx.clearRect(0, 0, cacheCanvas.width / dpr, cacheCanvas.height / dpr);
+      cacheCtx.scale(dpr, dpr);
+      const logicalW = cacheCanvas.width / dpr;
+      const logicalH = cacheCanvas.height / dpr;
+      cacheCtx.clearRect(0, 0, logicalW, logicalH);
 
       const sorted = [...drawObjects].sort((a, b) => a.zOrder - b.zOrder);
       for (const obj of sorted) {
@@ -5582,7 +5579,8 @@
 
       // Enhanced pressure range: 0.2x ~ 1.5x (wider than old 0.5x ~ 1.5x)
       function pressureWidth(i) {
-        return lw * (0.2 + smoothPressure(i) * 1.3);
+        // 筆圧マッピング: 軽いタッチ→極細、強く押す→太い (range 0.1x〜2.0x)
+        return lw * (0.1 + smoothPressure(i) * 1.9);
       }
 
       if (pts.length === 2) {
@@ -5643,7 +5641,8 @@
         return prev * 0.3 + cur * 0.7;
       }
       function pressureWidth(i) {
-        return lw * (0.2 + smoothPressure(i) * 1.3);
+        // 筆圧マッピング: 軽いタッチ→極細、強く押す→太い (range 0.1x〜2.0x)
+        return lw * (0.1 + smoothPressure(i) * 1.9);
       }
 
       drawingCtx.save();
