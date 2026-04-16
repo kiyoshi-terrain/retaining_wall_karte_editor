@@ -1856,6 +1856,8 @@
     let photoData = [];
     let currentPhotoIndex = null;
     let hasUnsavedChanges = false;
+    // Web Locks: 他タブで同じファイルが開かれていないか排他制御
+    let fileLockRelease = null;    // ロック解放用のresolver (null = ロック未保持)
     let savedColumnWidths = {}; // シートごとの列幅を保持
     let savedRowHeights = {};   // シートごとの行高さを保持
     let savedOriginalColsXml = {}; // シートごとの元の<cols>XMLを保持（キー: シート名）
@@ -1903,6 +1905,43 @@
     const IDB_STORE = 'files';
     const IDB_PHOTO_STORE = 'photos';
     const IDB_ANNOTATION_STORE = 'annotations';
+
+    // ============================
+    // Web Locks: 他タブとの排他制御
+    // ============================
+    // 同一ファイルを複数タブで同時に開くと delta-save 競合でデータ破損の恐れ。
+    // Web Locks APIで "file:{filename}" に排他ロックを取り、他タブでの同時オープンを拒否する。
+    // タブを閉じるとブラウザが自動でロック解放するため cleanup 漏れなし。
+    async function acquireFileLock(filename) {
+      if (!navigator.locks) {
+        console.warn('[FileLock] Web Locks API not available');
+        return true; // 古いブラウザではロック無効化（機能を阻害しない）
+      }
+      const lockName = `file:${filename}`;
+      return new Promise((resolveOuter) => {
+        // ifAvailable: 既にロックされていれば即座に null で callback が呼ばれる
+        navigator.locks.request(lockName, { mode: 'exclusive', ifAvailable: true }, (lock) => {
+          if (!lock) {
+            // 他タブが保持中
+            resolveOuter(false);
+            return Promise.resolve();
+          }
+          // ロック取得成功。callback の Promise が未解決である間ロック保持。
+          // fileLockRelease を呼ぶとロック解放される。
+          return new Promise((releaseFn) => {
+            fileLockRelease = releaseFn;
+            resolveOuter(true);
+          });
+        });
+      });
+    }
+
+    function releaseFileLock() {
+      if (fileLockRelease) {
+        fileLockRelease();
+        fileLockRelease = null;
+      }
+    }
 
     function openIDB() {
       return new Promise((resolve, reject) => {
@@ -2257,6 +2296,8 @@
       if (cacheCanvas) { cacheCanvas.width = 0; cacheCanvas = null; cacheCtx = null; }
       if (drawingCanvas) { drawingCanvas.width = 0; }
       if (bgCanvas) { bgCanvas.width = 0; }
+      // ファイルロックを解放（他タブで開けるようにする）
+      releaseFileLock();
     }
 
     // 未保存変更の離脱警告
@@ -4065,6 +4106,15 @@
 
     // Excelファイル読み込み
     async function loadExcelFile(file) {
+      // 他タブで同じファイルが開かれていないか確認（Web Locks）
+      // 既に別ファイルを開いていた場合は先に解放してから新規取得
+      releaseFileLock();
+      const acquired = await acquireFileLock(file.name);
+      if (!acquired) {
+        alert(`"${file.name}" は別のタブで既に開かれています。\nそのタブを閉じるか、別のファイルを選択してください。`);
+        return;
+      }
+
       showLoading('Loading Excel...');
 
       try {
