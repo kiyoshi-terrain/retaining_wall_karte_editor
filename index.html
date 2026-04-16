@@ -1858,10 +1858,6 @@
     let savedColsByFilePath = {};  // ファイルパス(sheet1.xmlなど) → 元の<cols>XML（マッピング失敗時フォールバック用）
     let savedFmtByFilePath = {};   // ファイルパス → 元の<sheetFormatPr>（マッピング失敗時フォールバック用）
     let savedNormalFont = null;    // 原本のNormalフォント(fontId=0)XML — 列幅計算の基準
-    // ロード時に空スタブへ差し替えたレガシー/マクロ用シートの原本XMLを保持（保存時に復元）
-    // キー: "xl/worksheets/sheetN.xml" のファイルパス, 値: 原本のXML文字列
-    let stubbedLegacySheetXml = {};
-    let stubbedLegacySheetRelsXml = {};
     // ★ Phase 1j: 擁壁フォーマット用の delta 保存に使う「原本 zip バッファ」。
     //   ExcelJS/xlsx-populate に zip 再生成させず、load 時のバイト列を基点に
     //   必要な XML だけ差し替えて save する。
@@ -2120,8 +2116,6 @@
     let drawingTextSize = 12;      // テキスト注釈のフォントサイズ
     let drawingColor = '#ff0000';
     let drawingLineWidth = 3;
-    let drawingHistory = [];       // Phase移行中は残す（Phase 2完了後に削除）
-    let drawingHistoryIndex = -1;  // Phase移行中は残す
     let drawingTransform = { x: 0, y: 0, scale: 1 };
     let activePointers = new Map();
 
@@ -3932,8 +3926,6 @@
         savedSheetFormatPr = {};
         savedColsByFilePath = {};
         savedFmtByFilePath = {};
-        stubbedLegacySheetXml = {};
-        stubbedLegacySheetRelsXml = {};
         let zipSheetNames = []; // ZIP内のシート名一覧（ExcelJS読み落とし検出用）
         try {
           const zip = await JSZip.loadAsync(loadBuffer);
@@ -4863,8 +4855,6 @@
       drawingTool = 'pen';
       drawingColor = '#ff0000';
       drawingLineWidth = 3;
-      drawingHistory = [];
-      drawingHistoryIndex = -1;
       drawingTransform = { x: 0, y: 0, scale: 1 };
       isDrawing = false;
       activePointers.clear();
@@ -4916,7 +4906,7 @@
           renderDrawingObjects();
         } else {
           drawObjects = [];
-          saveDrawingState();
+
         }
 
         modal.classList.add('active');
@@ -5456,11 +5446,6 @@
     }
 
     // --- Undo/Redo (互換ラッパー + 新方式) ---
-
-    function saveDrawingState() {
-      // レガシー互換: openDrawingModal初期化時のみ使用
-      // オブジェクト方式ではpushUndo()を直接使用
-    }
 
     function undoDrawing() { undoObj(); }
     function redoDrawing() { redoObj(); }
@@ -6311,8 +6296,6 @@
       drawingTool = 'pen';
       drawingColor = '#222222';
       drawingLineWidth = 3;
-      drawingHistory = [];
-      drawingHistoryIndex = -1;
       drawingTransform = { x: 0, y: 0, scale: 1 };
       isDrawing = false;
       activePointers.clear();
@@ -6329,8 +6312,6 @@
 
       updateDrawingToolbarUI();
       document.getElementById('drawing-width-select').value = '3';
-
-      saveDrawingState();
 
       // stickyNote用のsheetNameにプレフィックスを付けて識別
       const stickyKey = `__sticky__${sheetName}__${Date.now()}`;
@@ -7072,20 +7053,6 @@
       }
     }
 
-    // 後方互換ラッパー（文字列→文字列）
-    function writeInlineStringCell(sheetXml, cellRef, text) {
-      const doc = parseSheetXmlToDOM(sheetXml);
-      if (!doc) return sheetXml;
-      writeInlineStringCellDOM(doc, cellRef, text);
-      return serializeSheetDOM(doc);
-    }
-
-    function clearCellValue(sheetXml, cellRef) {
-      const doc = parseSheetXmlToDOM(sheetXml);
-      if (!doc) return sheetXml;
-      clearCellValueDOM(doc, cellRef);
-      return serializeSheetDOM(doc);
-    }
 
     // 本体: 擁壁フォーマット用の delta 保存
     async function buildSaveBlobRetainingWall() {
@@ -7484,28 +7451,6 @@
       // ExcelJSがデフォルト幅の列にも customWidth="1" を付けてしまう問題を修正
       // オリジナルではwidth="9"の列にcustomWidthがないため、Excelの表示列幅が変わる
       buffer = await fixExcelJSColWidths(buffer);
-
-      // ★ Phase 1g: ロード時に空スタブへ差し替えたレガシー/マクロ用シートを復元
-      //   ⚠️ 保留中: ExcelJS がロード→保存でシートXMLファイル番号を振り直すため、
-      //     元のファイルパス (xl/worksheets/sheet6.xml など) に書き戻しても
-      //     別のシートに割り当てられた位置を破壊してしまう。
-      //     固定パス→シート名で解決してから書き戻す必要があるため、一旦無効化。
-      //     代わりに保存時に正しいパスを解決する実装を追加するまで、Photo123 は空のまま保存される。
-      if (false && (Object.keys(stubbedLegacySheetXml).length > 0 || Object.keys(stubbedLegacySheetRelsXml).length > 0)) {
-        try {
-          const zip = await JSZip.loadAsync(buffer);
-          for (const [path, xml] of Object.entries(stubbedLegacySheetXml)) {
-            zip.file(path, xml);
-            console.log(`[Phase 1g] restored legacy sheet: ${path} (${xml.length} bytes)`);
-          }
-          for (const [path, xml] of Object.entries(stubbedLegacySheetRelsXml)) {
-            zip.file(path, xml);
-          }
-          buffer = await zip.generateAsync({ type: 'arraybuffer' });
-        } catch (e) {
-          console.warn('[Phase 1g] legacy sheet restore failed:', e);
-        }
-      }
 
       // ZIP整合性検証・修復（ExcelJSが壊したContent_Typesやdrawing参照を修正）
       buffer = await verifyAndFixZipIntegrity(buffer);
