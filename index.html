@@ -2413,6 +2413,10 @@
           // 以降のSaveでDrive上書きに切り替え
           driveFileId = data.id;
           driveFileName = filename;
+          // 写真アップロード先をExcelと同じフォルダに統一
+          if (!driveParentFolderId) {
+            driveParentFolderId = targetFolderId;
+          }
           document.getElementById('current-file-path').textContent = 'Google Drive';
           setStatus('Uploaded to Google Drive', filename);
         }
@@ -2555,7 +2559,8 @@
         console.log('Raw photo uploaded to Drive:', filename);
       } catch (err) {
         console.warn('Raw photo Drive upload failed:', err);
-        // 失敗してもExcel処理は続行（サイレント）
+        setStatus('Photo backup failed', filename);
+        // 失敗してもExcel処理は続行
       }
     }
 
