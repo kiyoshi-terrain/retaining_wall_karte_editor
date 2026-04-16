@@ -2463,7 +2463,7 @@
           const item = document.createElement('div');
           item.className = 'drive-file-item';
           const size = f.size ? formatBytes(parseInt(f.size)) : '';
-          const date = f.modifiedTime ? new Date(f.modifiedTime).toLocaleDateString('ja-JP') : '';
+          const date = f.modifiedTime ? new Date(f.modifiedTime).toLocaleString('ja-JP', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '';
           item.innerHTML = `<div class="drive-file-icon">\uD83D\uDCC4</div><div class="drive-file-info"><div class="drive-file-name">${escapeHtml(f.name)}</div><div class="drive-file-meta">${size}${size && date ? ' \u00B7 ' : ''}${date}</div></div>`;
           item.onclick = () => openDriveFile(f.id, f.name);
           listEl.appendChild(item);
