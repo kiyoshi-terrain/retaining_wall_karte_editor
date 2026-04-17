@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v6-menu-icon-width';
+const CACHE_NAME = 'rw-karte-v7-preserve-shapes';
 const ASSETS = [
   './',
   './index.html',
