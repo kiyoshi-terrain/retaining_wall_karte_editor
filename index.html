@@ -4922,6 +4922,7 @@
         }
       }
       // allImages の入力順をなるべく保つため再ソート不要 (Map はinsertion-order)
+      console.log(`[renderFigSheet] sheet=${sheetName} allImages=${allImages.length} uniqueRanges=${figImages.length} overlays=${overlayByRange.size}`);
 
       // IDB復元で空エントリが先に作られている場合でも、必ずExcelから画像を再解析する。
       // 既存の手書きデータ (drawingDataUrl, pageDrawings 等) は保持しつつ、
@@ -5196,7 +5197,7 @@
 
       // 該当ページのレイヤーを legacy フィールドに展開
       // (openDrawingModal / renderFigSheetUI / saveAnnotation は legacy フィールドを参照)
-      ad.backgroundDataUrl = ad.pages[newPage].dataUrl;
+      ad.backgroundDataUrl = ad.pages[newPage]?.dataUrl || ad.backgroundDataUrl;
       ad.drawingDataUrl    = ad.pageDrawings?.[newPage]     || null;
       ad.drawObjects       = ad.pageDrawObjects?.[newPage]  || [];
       ad.compositeDataUrl  = ad.pageComposites?.[newPage]   || null;
@@ -5229,8 +5230,24 @@
         alert('Memo data not found for this sheet. Try reopening the file.');
         return;
       }
+      // セーフティネット: pages があるのに backgroundDataUrl が空なら現在ページから復元
+      if (!ad.backgroundDataUrl && ad.pages && ad.pages.length > 0) {
+        const cp = Math.min(ad.currentPage || 0, ad.pages.length - 1);
+        ad.backgroundDataUrl = ad.pages[cp]?.dataUrl || ad.pages[0]?.dataUrl || null;
+        console.warn('[openDrawingModal] backgroundDataUrl recovered from pages[', cp, ']');
+      }
       if (!ad.backgroundDataUrl) {
-        console.error('[openDrawingModal] backgroundDataUrl is null for:', sheetName, ad);
+        console.error('[openDrawingModal] backgroundDataUrl is null for:', sheetName, {
+          hasPages: !!ad.pages,
+          pagesCount: ad.pages?.length,
+          currentPage: ad.currentPage,
+          hasOriginalImages: !!ad.originalImages,
+          originalImagesCount: ad.originalImages?.length,
+          hasPageDrawings: !!ad.pageDrawings,
+          pageDrawingsKeys: ad.pageDrawings ? Object.keys(ad.pageDrawings) : null,
+          isModified: ad.isModified,
+          isStickyNote: ad.isStickyNote
+        });
         alert('Background image not loaded. Try switching pages and coming back.');
         return;
       }
