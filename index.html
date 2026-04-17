@@ -1075,9 +1075,11 @@
     }
     .menu-sheet-btn .menu-icon {
       font-size: 16px;
-      width: 24px;
+      min-width: 44px;
+      width: auto;
       text-align: center;
       flex-shrink: 0;
+      white-space: nowrap;
     }
     .menu-sheet-btn .menu-label { flex: 1; }
     .menu-sheet-btn .menu-hint {
@@ -1814,7 +1816,7 @@
       <span class="menu-hint">Upload as new file (custom name)</span>
     </button>
     <button class="menu-sheet-btn" onclick="toggleDriveAutoBackup()" id="menu-drive-autobackup-btn">
-      <span class="menu-icon">[⟳]</span>
+      <span class="menu-icon">[↻]</span>
       <span class="menu-label">Drive auto-backup</span>
       <span class="menu-hint" id="menu-drive-autobackup-hint">OFF</span>
     </button>
