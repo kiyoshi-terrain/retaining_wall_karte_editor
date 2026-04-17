@@ -30,6 +30,59 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 
   <title>Retaining Wall Karte - No More Excel Hell</title>
+  <!-- ===== Dev Debug Scaffold ===== -->
+  <!-- ?debug=1 を付けて開くと Eruda (iPadで使えるコンソール) が起動 -->
+  <!-- さらに window.onerror / unhandledrejection を localStorage に蓄積 → ログ共有ボタンから出せる -->
+  <script>
+    (function() {
+      // 1) ビルドID (デプロイ版識別用)
+      window.__BUILD_ID__ = 'build-' + (new Date().toISOString().slice(0,16).replace(/[-T:]/g,''));
+
+      // 2) グローバルエラーキャプチャ (常時ON, 直近200件)
+      const LOG_KEY = 'rw-karte-errlog';
+      function pushLog(entry) {
+        try {
+          const list = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
+          list.push(entry); while (list.length > 200) list.shift();
+          localStorage.setItem(LOG_KEY, JSON.stringify(list));
+        } catch (_) {}
+      }
+      window.addEventListener('error', (e) => {
+        pushLog({ t: new Date().toISOString(), kind: 'error', msg: String(e.message), src: e.filename, line: e.lineno, col: e.colno, stack: e.error?.stack });
+      });
+      window.addEventListener('unhandledrejection', (e) => {
+        pushLog({ t: new Date().toISOString(), kind: 'unhandledrejection', msg: String(e.reason?.message || e.reason), stack: e.reason?.stack });
+      });
+      // console.error も拾う
+      const _origErr = console.error.bind(console);
+      console.error = function(...args) {
+        try { pushLog({ t: new Date().toISOString(), kind: 'console.error', msg: args.map(a => { try { return typeof a === 'string' ? a : JSON.stringify(a); } catch(_){ return String(a); } }).join(' ') }); } catch(_){}
+        _origErr(...args);
+      };
+      window.__exportErrorLog = function() {
+        const logs = localStorage.getItem(LOG_KEY) || '[]';
+        const blob = new Blob([logs], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'rw-karte-errlog-' + Date.now() + '.json';
+        a.click();
+      };
+      window.__clearErrorLog = function() { localStorage.removeItem(LOG_KEY); };
+
+      // 3) ?debug=1 で Eruda 起動
+      const params = new URLSearchParams(location.search);
+      if (params.get('debug') === '1' || localStorage.getItem('rw-karte-debug') === '1') {
+        localStorage.setItem('rw-karte-debug', '1');
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/eruda';
+        s.onload = function() { try { eruda.init(); console.log('[debug] Eruda ready, build=' + window.__BUILD_ID__); } catch(e) { console.warn('eruda init failed', e); } };
+        document.head.appendChild(s);
+      }
+      if (params.get('debug') === '0') {
+        localStorage.removeItem('rw-karte-debug');
+      }
+    })();
+  </script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"
           integrity="sha384-Pqp51FUN2/qzfxZxBCtF0stpc9ONI6MYZpVqmo8m20SoaQCzf+arZvACkLkirlPz"
           crossorigin="anonymous"></script>
@@ -1625,7 +1678,27 @@
       <button class="btn btn-primary" onclick="saveFile()">Save</button>
       <button class="btn-menu" onclick="openMenuSheet()" title="Menu">≡</button>
     </div>
+    <div id="version-badge"
+         onclick="toggleDebugMenu()"
+         style="position:absolute; right:8px; bottom:2px; font-size:9px; color:rgba(255,255,255,0.35); cursor:pointer; user-select:none; z-index:100;"
+         title="tap to open debug menu"></div>
   </header>
+  <script>
+    document.getElementById('version-badge').textContent = window.__BUILD_ID__ || 'no-build';
+    function toggleDebugMenu() {
+      const isDebug = localStorage.getItem('rw-karte-debug') === '1';
+      const msg = (isDebug ? '[Debug ON]' : '[Debug OFF]') + '\n\n' +
+        'OK: Eruda ON/OFF 切替 (リロードして反映)\n' +
+        'Cancel: エラーログを JSON ダウンロード';
+      if (confirm(msg)) {
+        if (isDebug) localStorage.removeItem('rw-karte-debug');
+        else localStorage.setItem('rw-karte-debug', '1');
+        location.reload();
+      } else {
+        window.__exportErrorLog && window.__exportErrorLog();
+      }
+    }
+  </script>
 
   <!-- メインコンテンツ -->
   <main class="container">
