@@ -1769,18 +1769,45 @@
   </div>
 
   <!-- アクションシート（写真選択方法） -->
-  <!-- Overlay Camera (getUserMedia + 前回写真半透明オーバーレイ) -->
+  <!-- Overlay Camera: オーバーレイ表示 + 並列表示 2モード切替 -->
   <div id="overlay-camera" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;">
-    <video id="overlay-camera-video" autoplay playsinline muted
-           style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;"></video>
-    <img id="overlay-camera-ghost" alt=""
-         style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0.35;pointer-events:none;">
-    <div style="position:absolute;top:0;left:0;right:0;padding:12px 16px;background:linear-gradient(to bottom,rgba(0,0,0,0.7),transparent);color:#fff;display:flex;align-items:center;gap:12px;">
+    <!-- コンテナ: overlay モード (絶対配置で重ねる) or split モード (flex で分割) -->
+    <div id="overlay-camera-stage" data-mode="overlay"
+         style="position:absolute;inset:0;display:flex;flex-direction:column;">
+      <!-- ビデオ(カメラ) -->
+      <div id="overlay-camera-video-wrap"
+           style="position:relative;flex:1;overflow:hidden;background:#000;min-height:0;">
+        <video id="overlay-camera-video" autoplay playsinline muted
+               style="width:100%;height:100%;object-fit:cover;background:#000;"></video>
+        <!-- オーバーレイモード時: ghost をこの video 上に絶対配置 -->
+        <img id="overlay-camera-ghost-overlay" alt=""
+             style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0.35;pointer-events:none;display:block;">
+        <div style="position:absolute;top:4px;left:8px;color:#fff;font-size:11px;background:rgba(0,0,0,0.5);padding:2px 8px;">LIVE</div>
+      </div>
+      <!-- 並列モード用: ghost をこの panel に配置 (overlay モード時は非表示) -->
+      <div id="overlay-camera-ghost-panel"
+           style="position:relative;flex:1;overflow:hidden;background:#000;min-height:0;display:none;">
+        <img id="overlay-camera-ghost-split" alt=""
+             style="width:100%;height:100%;object-fit:contain;background:#111;">
+        <div style="position:absolute;top:4px;left:8px;color:#fff;font-size:11px;background:rgba(0,0,0,0.5);padding:2px 8px;">PREVIOUS</div>
+      </div>
+    </div>
+
+    <!-- トップバー (全モード共通、stage より上) -->
+    <div style="position:absolute;top:0;left:0;right:0;padding:12px 16px;background:linear-gradient(to bottom,rgba(0,0,0,0.7),transparent);color:#fff;display:flex;align-items:center;gap:12px;z-index:2;">
       <button onclick="closeOverlayCamera()" style="background:rgba(255,255,255,0.15);color:#fff;border:1px solid #fff;padding:6px 12px;font-family:inherit;cursor:pointer;">✕ Close</button>
       <span id="overlay-camera-label" style="font-weight:700;"></span>
+      <span style="flex:1;"></span>
+      <button onclick="setOverlayMode('overlay')" id="overlay-camera-mode-overlay"
+              style="background:rgba(255,255,255,0.25);color:#fff;border:1px solid #fff;padding:6px 10px;font-family:inherit;cursor:pointer;font-size:12px;">重ねる</button>
+      <button onclick="setOverlayMode('split')" id="overlay-camera-mode-split"
+              style="background:rgba(255,255,255,0.15);color:#fff;border:1px solid #fff;padding:6px 10px;font-family:inherit;cursor:pointer;font-size:12px;">並列</button>
     </div>
-    <div style="position:absolute;bottom:0;left:0;right:0;padding:20px 16px 30px;background:linear-gradient(to top,rgba(0,0,0,0.75),transparent);display:flex;flex-direction:column;align-items:center;gap:14px;">
-      <div style="display:flex;align-items:center;gap:10px;color:#fff;width:100%;max-width:480px;">
+
+    <!-- ボトムバー (コントロール) -->
+    <div style="position:absolute;bottom:0;left:0;right:0;padding:20px 16px 30px;background:linear-gradient(to top,rgba(0,0,0,0.75),transparent);display:flex;flex-direction:column;align-items:center;gap:14px;z-index:2;">
+      <!-- 透明度スライダー: overlay モードでのみ表示 -->
+      <div id="overlay-camera-opacity-wrap" style="display:flex;align-items:center;gap:10px;color:#fff;width:100%;max-width:480px;">
         <span style="font-size:11px;min-width:40px;">透明</span>
         <input type="range" id="overlay-camera-opacity" min="0" max="100" value="35" step="5"
                style="flex:1;" oninput="updateOverlayOpacity(this.value)">
@@ -7656,10 +7683,11 @@
     }
 
     // ============================
-    // オーバーレイカメラ: 前回写真を半透明で重ねて位置合わせ撮影
+    // オーバーレイカメラ: 重ねる/並列 2モードで前回写真を参照しながら撮影
     // ============================
     let overlayStream = null;           // 現在の MediaStream
     let overlayFacingMode = 'environment'; // 'environment' (リア) or 'user' (フロント)
+    let overlayDisplayMode = 'overlay';    // 'overlay' (重ねる) or 'split' (並列)
 
     async function openOverlayCamera() {
       const photo = photoData[currentPhotoIndex];
@@ -7669,7 +7697,6 @@
       }
       closeActionSheet();
 
-      // HTTPS 必須 (getUserMedia の要件)
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         alert('このブラウザはカメラ API (getUserMedia) に対応していません');
         return;
@@ -7677,11 +7704,14 @@
 
       const modal = document.getElementById('overlay-camera');
       const video = document.getElementById('overlay-camera-video');
-      const ghost = document.getElementById('overlay-camera-ghost');
+      const ghostOverlay = document.getElementById('overlay-camera-ghost-overlay');
+      const ghostSplit = document.getElementById('overlay-camera-ghost-split');
       const labelEl = document.getElementById('overlay-camera-label');
 
-      ghost.src = photo.imageBase64;
-      labelEl.textContent = `${photo.label} — 前回写真と重ねて撮影`;
+      ghostOverlay.src = photo.imageBase64;
+      ghostSplit.src = photo.imageBase64;
+      labelEl.textContent = `${photo.label} — 位置合わせ撮影`;
+      setOverlayMode(overlayDisplayMode); // 現在のモードを反映
       modal.style.display = 'block';
 
       try {
@@ -7732,14 +7762,57 @@
     }
 
     function updateOverlayOpacity(val) {
-      const ghost = document.getElementById('overlay-camera-ghost');
-      ghost.style.opacity = (parseFloat(val) / 100).toString();
+      const ghost = document.getElementById('overlay-camera-ghost-overlay');
+      if (ghost) ghost.style.opacity = (parseFloat(val) / 100).toString();
     }
 
     function toggleOverlayVisible() {
-      const ghost = document.getElementById('overlay-camera-ghost');
-      ghost.style.visibility = ghost.style.visibility === 'hidden' ? 'visible' : 'hidden';
+      // overlay モードなら ghost overlay を、split モードなら split panel をトグル
+      if (overlayDisplayMode === 'overlay') {
+        const ghost = document.getElementById('overlay-camera-ghost-overlay');
+        if (ghost) ghost.style.visibility = ghost.style.visibility === 'hidden' ? 'visible' : 'hidden';
+      } else {
+        const panel = document.getElementById('overlay-camera-ghost-panel');
+        if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+      }
     }
+
+    function setOverlayMode(mode) {
+      overlayDisplayMode = mode;
+      const stage = document.getElementById('overlay-camera-stage');
+      const ghostOverlay = document.getElementById('overlay-camera-ghost-overlay');
+      const ghostPanel = document.getElementById('overlay-camera-ghost-panel');
+      const opacityWrap = document.getElementById('overlay-camera-opacity-wrap');
+      const btnOverlay = document.getElementById('overlay-camera-mode-overlay');
+      const btnSplit = document.getElementById('overlay-camera-mode-split');
+
+      if (mode === 'overlay') {
+        // 重ねる: video 単体 + ghost を video 上に絶対配置
+        stage.style.flexDirection = 'column';
+        ghostOverlay.style.display = 'block';
+        ghostOverlay.style.visibility = 'visible';
+        ghostPanel.style.display = 'none';
+        opacityWrap.style.display = 'flex';
+        btnOverlay.style.background = 'rgba(255,255,255,0.35)';
+        btnSplit.style.background = 'rgba(255,255,255,0.15)';
+      } else {
+        // 並列: video と ghost を flex で分割。画面向きで縦/横自動
+        const landscape = window.innerWidth > window.innerHeight;
+        stage.style.flexDirection = landscape ? 'row' : 'column';
+        ghostOverlay.style.display = 'none';
+        ghostPanel.style.display = 'block';
+        opacityWrap.style.display = 'none'; // 並列では透明度不要
+        btnOverlay.style.background = 'rgba(255,255,255,0.15)';
+        btnSplit.style.background = 'rgba(255,255,255,0.35)';
+      }
+    }
+
+    // 画面回転で並列モードの flex-direction を自動切替
+    window.addEventListener('resize', () => {
+      if (document.getElementById('overlay-camera').style.display === 'block' && overlayDisplayMode === 'split') {
+        setOverlayMode('split');
+      }
+    });
 
     async function captureOverlayPhoto() {
       const video = document.getElementById('overlay-camera-video');
