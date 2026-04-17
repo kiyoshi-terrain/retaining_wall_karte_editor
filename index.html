@@ -5115,7 +5115,7 @@
                     style="padding:8px 16px;${current === 0 ? 'opacity:0.3;pointer-events:none;' : ''}">&lt; Prev</button>
             <span style="color:#e0e0e0;font-weight:600;font-size:16px;">Page ${current + 1} / ${total}</span>
             <button class="btn" onclick="figPageNav('${escapeHtml(sheetName)}', 1)"
-                    style="padding:8px 16px;${current === total - 1 ? 'opacity:0.3;pointer-events:none;' : ''}"">Next &gt;</button>
+                    style="padding:8px 16px;${current === total - 1 ? 'opacity:0.3;pointer-events:none;' : ''}">Next &gt;</button>
           </div>
         `;
       }
@@ -5184,7 +5184,16 @@
 
     function openDrawingModal(sheetName) {
       const ad = annotationData[sheetName];
-      if (!ad || !ad.backgroundDataUrl) return;
+      if (!ad) {
+        console.error('[openDrawingModal] annotationData not found for:', sheetName);
+        alert('Memo data not found for this sheet. Try reopening the file.');
+        return;
+      }
+      if (!ad.backgroundDataUrl) {
+        console.error('[openDrawingModal] backgroundDataUrl is null for:', sheetName, ad);
+        alert('Background image not loaded. Try switching pages and coming back.');
+        return;
+      }
 
       const modal = document.getElementById('drawing-modal');
 
