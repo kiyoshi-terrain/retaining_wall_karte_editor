@@ -2062,8 +2062,10 @@
           isStickyNote: annotationObj.isStickyNote || false,
           parentSheet: annotationObj.parentSheet || null,
           originalImages: annotationObj.originalImages || [],
-          // ページ分割モード（損傷図等）の全ページ手書きデータ
+          // ページ分割モード（損傷図等）の全ページ独立レイヤー
           pageDrawings: annotationObj.pageDrawings || null,
+          pageDrawObjects: annotationObj.pageDrawObjects || null,
+          pageComposites: annotationObj.pageComposites || null,
           currentPage: annotationObj.currentPage ?? null,
           savedAt: new Date().toISOString(),
         });
@@ -4773,10 +4775,18 @@
             if (!ad.originalImages || ad.originalImages.length === 0) {
               ad.originalImages = rec.originalImages || [];
             }
-            // ページ分割モードの手書きデータを復元
+            // ページ分割モードの全レイヤーを復元
             if (hasPageDrawings) {
-              ad.pageDrawings = rec.pageDrawings;
-              if (rec.currentPage != null) ad.currentPage = rec.currentPage;
+              ad.pageDrawings    = rec.pageDrawings;
+              ad.pageDrawObjects = rec.pageDrawObjects || {};
+              ad.pageComposites  = rec.pageComposites  || {};
+              if (rec.currentPage != null) {
+                ad.currentPage = rec.currentPage;
+                // 復元直後の legacy フィールドも現在ページに揃える
+                ad.drawingDataUrl   = ad.pageDrawings[ad.currentPage]    || ad.drawingDataUrl;
+                ad.drawObjects      = ad.pageDrawObjects[ad.currentPage] || ad.drawObjects;
+                ad.compositeDataUrl = ad.pageComposites[ad.currentPage]  || ad.compositeDataUrl;
+              }
             }
             ad.isModified = true;
             restored++;
@@ -4912,7 +4922,10 @@
               originalImages: figImages,
               pages: sortedPages,       // ページ配列
               currentPage: 0,           // 現在のページ番号
-              pageDrawings: {},         // { pageIdx: drawingDataUrl } ページ別手書きデータ
+              // ページごとに独立した手書きレイヤー
+              pageDrawings: {},         // { pageIdx: drawingDataUrl (PNG) } 手書きPNG
+              pageDrawObjects: {},      // { pageIdx: [drawObject, ...] } 描画オブジェクト配列
+              pageComposites: {},       // { pageIdx: compositeDataUrl } プレビュー用合成画像
             };
             renderFigSheetUI(sheet, sheetName);
             return;
@@ -5130,27 +5143,25 @@
     }
 
     // ページ切替 (損傷図等)
+    // 各ページに独立した手書きレイヤー (pageDrawings/pageDrawObjects/pageComposites)
+    // を持つため、ページ切替時はそれらから該当ページのデータを legacy フィールドに
+    // 展開するだけ（全て saveAnnotation 側で per-page に保存済み）。
     function figPageNav(sheetName, delta) {
       const ad = annotationData[sheetName];
       if (!ad || !ad.pages) return;
 
-      // 現在ページの手書きデータを退避
-      if (ad.drawingDataUrl) {
-        if (!ad.pageDrawings) ad.pageDrawings = {};
-        ad.pageDrawings[ad.currentPage] = ad.drawingDataUrl;
-      }
-
-      // ページ移動
       const newPage = Math.max(0, Math.min(ad.pages.length - 1, (ad.currentPage || 0) + delta));
+      if (newPage === ad.currentPage) return;
       ad.currentPage = newPage;
+
+      // 該当ページのレイヤーを legacy フィールドに展開
+      // (openDrawingModal / renderFigSheetUI / saveAnnotation は legacy フィールドを参照)
       ad.backgroundDataUrl = ad.pages[newPage].dataUrl;
+      ad.drawingDataUrl    = ad.pageDrawings?.[newPage]     || null;
+      ad.drawObjects       = ad.pageDrawObjects?.[newPage]  || [];
+      ad.compositeDataUrl  = ad.pageComposites?.[newPage]   || null;
 
-      // 移動先ページの手書きデータを復元
-      ad.drawingDataUrl = ad.pageDrawings?.[newPage] || null;
-      ad.compositeDataUrl = null; // 再合成を促す
-
-      // 再描画 (compositeDataUrl を null にしたので backgroundDataUrl が表示される。
-      //   手書きデータがある場合は openDrawingModal 時に復元される)
+      // 再描画 (compositeDataUrl があれば合成画像、なければ背景のみを表示)
       const sheet = workbook.getWorksheet(sheetName);
       renderFigSheetUI(sheet, sheetName);
     }
@@ -6808,13 +6819,14 @@
     function saveAnnotation() {
       const sheetName = drawingCanvas.dataset.sheetName;
       if (!sheetName || !annotationData[sheetName]) return;
+      const ad = annotationData[sheetName];
 
       // オブジェクトを全レンダリングしてPNG生成
       selectedObjectId = null; // 選択UIを消す
       renderDrawingObjects();
 
-      annotationData[sheetName].drawingDataUrl = drawingCanvas.toDataURL('image/png');
-      annotationData[sheetName].drawObjects = serializeDrawObjects(drawObjects);
+      const drawingUrl = drawingCanvas.toDataURL('image/png');
+      const serialized = serializeDrawObjects(drawObjects);
 
       const compositeCanvas = document.createElement('canvas');
       compositeCanvas.width = bgCanvas.width;
@@ -6822,18 +6834,31 @@
       const compCtx = compositeCanvas.getContext('2d');
       compCtx.drawImage(bgCanvas, 0, 0);
       compCtx.drawImage(drawingCanvas, 0, 0);
+      const compositeUrl = compositeCanvas.toDataURL('image/png');
 
-      annotationData[sheetName].compositeDataUrl = compositeCanvas.toDataURL('image/png');
-      annotationData[sheetName].isModified = true;
+      if (ad.pages) {
+        // ページ分割モード: 現在ページのレイヤーに保存
+        ad.pageDrawings       = ad.pageDrawings       || {};
+        ad.pageDrawObjects    = ad.pageDrawObjects    || {};
+        ad.pageComposites     = ad.pageComposites     || {};
+        ad.pageDrawings[ad.currentPage]    = drawingUrl;
+        ad.pageDrawObjects[ad.currentPage] = serialized;
+        ad.pageComposites[ad.currentPage]  = compositeUrl;
+      }
+
+      // legacy フィールド: 現在ページ分を反映（非ページモードではこれのみ使用）
+      ad.drawingDataUrl   = drawingUrl;
+      ad.drawObjects      = serialized;
+      ad.compositeDataUrl = compositeUrl;
+      ad.isModified = true;
       hasUnsavedChanges = true;
 
       // IDB即時バックアップ（Excel保存が失敗しても復旧可能）
-      idbSaveAnnotation(sheetName, annotationData[sheetName]);
+      idbSaveAnnotation(sheetName, ad);
 
       closeDrawingModal();
 
       // 付箋メモの場合は親シートを、per-image keyの場合は実シートを再描画
-      const ad = annotationData[sheetName];
       const renderSheet = ad.isStickyNote ? ad.parentSheet : getFigParentSheet(sheetName);
       renderFigSheet(workbook.getWorksheet(renderSheet), renderSheet);
       setStatus(ad.isStickyNote ? 'Sticky note saved' : 'Annotation saved', renderSheet);
