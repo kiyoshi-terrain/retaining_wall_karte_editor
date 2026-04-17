@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v10-filename-modal';
+const CACHE_NAME = 'rw-karte-v11-overlay-camera';
 const ASSETS = [
   './',
   './index.html',
