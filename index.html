@@ -673,6 +673,17 @@
       margin-left: 6px;
     }
 
+    .photo-filename .photo-shape-badge {
+      display: inline-block;
+      background: #fde68a;
+      color: #92400e;
+      padding: 1px 6px;
+      border-radius: 8px;
+      margin-left: 6px;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
     .photo-label {
       position: absolute;
       top: 8px;
@@ -4821,6 +4832,285 @@
     }
 
     // ============================
+    // Photo(2) 図形 (非画像オブジェクト) 抽出 & ラスタライズ
+    // ============================
+    //
+    // Excel 職人が写真に重ねて描いた矢印・マル・フリーフォーム等を
+    // アプリの写真カードで目視可能にする。drawing3.xml の
+    // <xdr:sp>/<xdr:cxnSp> を抽出し、該当フレームの imageBase64 を
+    // Canvas で合成して photo.compositeDataUrl に保存。
+
+    // drawing XML から非画像 anchor を抽出
+    async function extractPhotoSheetShapes(originalBuf) {
+      const shapes = [];
+      try {
+        const zip = await JSZip.loadAsync(originalBuf);
+        // Photo(2) の drawing を特定
+        const wbXml = await zip.files['xl/workbook.xml'].async('string');
+        const m = wbXml.match(/<sheet[^>]*name="Photo\(2\)"[^>]*r:id="(rId\d+)"/);
+        if (!m) return shapes;
+        const wbRels = await zip.files['xl/_rels/workbook.xml.rels'].async('string');
+        const rm = wbRels.match(new RegExp(`<Relationship[^>]*Id="${m[1]}"[^>]*Target="([^"]+)"`));
+        if (!rm) return shapes;
+        const sheetPath = 'xl/' + rm[1].replace(/^\/?/, '').replace(/^xl\//, '');
+        const sheetName = sheetPath.split('/').pop();
+        const sheetRelsPath = `xl/worksheets/_rels/${sheetName}.rels`;
+        if (!zip.files[sheetRelsPath]) return shapes;
+        const srXml = await zip.files[sheetRelsPath].async('string');
+        const dm = srXml.match(/<Relationship[^>]*Target="([^"]*drawings\/[^"]+)"/);
+        if (!dm) return shapes;
+        const drawPath = dm[1].replace('../', 'xl/');
+        if (!zip.files[drawPath]) return shapes;
+        const drawXml = await zip.files[drawPath].async('string');
+
+        // 各 twoCellAnchor を走査
+        const anchorRe = /<xdr:twoCellAnchor\b[^>]*>([\s\S]*?)<\/xdr:twoCellAnchor>/g;
+        let am;
+        while ((am = anchorRe.exec(drawXml)) !== null) {
+          const body = am[1];
+          if (/<xdr:pic\b/.test(body)) continue; // 画像は除外
+          const shape = parseShapeAnchor(body);
+          if (shape) shapes.push(shape);
+        }
+        console.log(`[shapes] extracted ${shapes.length} non-image shapes from ${drawPath}`);
+      } catch (err) {
+        console.warn('[shapes] extraction failed:', err);
+      }
+      return shapes;
+    }
+
+    function parseShapeAnchor(body) {
+      // from/to 座標 (col, colOff, row, rowOff)
+      const fr = body.match(/<xdr:from>\s*<xdr:col>(\d+)<\/xdr:col>\s*<xdr:colOff>(-?\d+)<\/xdr:colOff>\s*<xdr:row>(\d+)<\/xdr:row>\s*<xdr:rowOff>(-?\d+)<\/xdr:rowOff>\s*<\/xdr:from>/);
+      const to = body.match(/<xdr:to>\s*<xdr:col>(\d+)<\/xdr:col>\s*<xdr:colOff>(-?\d+)<\/xdr:colOff>\s*<xdr:row>(\d+)<\/xdr:row>\s*<xdr:rowOff>(-?\d+)<\/xdr:rowOff>\s*<\/xdr:to>/);
+      if (!fr || !to) return null;
+
+      const name = body.match(/name="([^"]+)"/)?.[1] || '';
+      const lineColor = body.match(/<a:ln\b[^>]*>[\s\S]*?<a:solidFill>\s*<a:srgbClr val="([A-Fa-f0-9]+)"/)?.[1] || null;
+      const fillColor = body.match(/<xdr:spPr>[\s\S]*?<a:solidFill>\s*<a:srgbClr val="([A-Fa-f0-9]+)"/)?.[1] || null;
+      const lineW = parseInt(body.match(/<a:ln[^>]*w="(\d+)"/)?.[1] || '12700');
+
+      // 形状タイプ
+      let kind = null;
+      let pathData = null;
+      const prst = body.match(/<a:prstGeom prst="([^"]+)"/);
+      if (prst) kind = prst[1]; // rect, ellipse, line, roundRect 等
+      if (/<a:custGeom>/.test(body)) {
+        kind = 'custGeom';
+        pathData = parseCustGeom(body);
+      }
+
+      // xfrm ext (画像の実サイズ) → アンカー box からも計算可能だが xfrm が正
+      const extM = body.match(/<xdr:spPr>[\s\S]*?<a:ext cx="(\d+)" cy="(\d+)"/);
+      const xfrmOffM = body.match(/<xdr:spPr>[\s\S]*?<a:off x="(-?\d+)" y="(-?\d+)"/);
+
+      return {
+        name,
+        kind,
+        lineColor,
+        lineW_emu: lineW,
+        fillColor,
+        fromCol: parseInt(fr[1]), fromColOff: parseInt(fr[2]),
+        fromRow: parseInt(fr[3]), fromRowOff: parseInt(fr[4]),
+        toCol: parseInt(to[1]), toColOff: parseInt(to[2]),
+        toRow: parseInt(to[3]), toRowOff: parseInt(to[4]),
+        xfrmExt: extM ? { cx: parseInt(extM[1]), cy: parseInt(extM[2]) } : null,
+        xfrmOff: xfrmOffM ? { x: parseInt(xfrmOffM[1]), y: parseInt(xfrmOffM[2]) } : null,
+        pathData,
+      };
+    }
+
+    function parseCustGeom(body) {
+      const pathM = body.match(/<a:path\s+w="(\d+)"\s+h="(\d+)">([\s\S]*?)<\/a:path>/);
+      if (!pathM) return null;
+      const pathW = parseInt(pathM[1]);
+      const pathH = parseInt(pathM[2]);
+      const inner = pathM[3];
+      const cmds = [];
+      // トークン化: moveTo / lnTo / cubicBezTo / close の各コマンドとその pt を抽出
+      const cmdRe = /<a:(moveTo|lnTo|cubicBezTo|close)>([\s\S]*?)<\/a:\1>/g;
+      let cm;
+      while ((cm = cmdRe.exec(inner)) !== null) {
+        const type = cm[1];
+        const pts = [];
+        const ptRe = /<a:pt\s+x="(-?\d+)"\s+y="(-?\d+)"\/>/g;
+        let pm;
+        while ((pm = ptRe.exec(cm[2])) !== null) {
+          pts.push({ x: parseInt(pm[1]), y: parseInt(pm[2]) });
+        }
+        cmds.push({ type, pts });
+      }
+      return { pathW, pathH, cmds };
+    }
+
+    // テンプレ列幅 (列 col → EMU 幅)
+    //   col 0 (A): 3.25 char × 7px × 9525 EMU/px ≈ 216000 ?
+    //   実測: テンプレ既存画像から col width ≈ 304000 EMU/col
+    const COL_EMU_DEFAULT = 304000;
+    const ROW_EMU_DEFAULT = 190500;
+
+    function emuFromAnchor(anchor, field) {
+      // sheet 全体の EMU 座標 (left/top/right/bottom) を返す
+      const cToEmu = (col, colOff) => col * COL_EMU_DEFAULT + colOff;
+      const rToEmu = (row, rowOff) => row * ROW_EMU_DEFAULT + rowOff;
+      if (field === 'left')   return cToEmu(anchor.fromCol, anchor.fromColOff);
+      if (field === 'top')    return rToEmu(anchor.fromRow, anchor.fromRowOff);
+      if (field === 'right')  return cToEmu(anchor.toCol, anchor.toColOff);
+      if (field === 'bottom') return rToEmu(anchor.toRow, anchor.toRowOff);
+    }
+
+    // 各フレームの画像矩形 (sheet EMU) を計算し、そのレンジ内に入る shape を割り当てる
+    function assignShapesToFrames(shapes, frames) {
+      // 各 frame の box: from = (labelCol-1, labelRow-1) 0-indexed
+      //   テンプレ画像枠は 18 cols × 23 rows 相当 (列グループに依存)
+      for (const frame of frames) {
+        frame.shapes = [];
+      }
+      for (const shape of shapes) {
+        const sLeft = emuFromAnchor(shape, 'left');
+        const sTop = emuFromAnchor(shape, 'top');
+        const sRight = emuFromAnchor(shape, 'right');
+        const sBottom = emuFromAnchor(shape, 'bottom');
+        // どのフレームに属するかを重心で判定
+        const cx = (sLeft + sRight) / 2;
+        const cy = (sTop + sBottom) / 2;
+
+        let bestFrame = null;
+        let bestDist = Infinity;
+        for (const frame of frames) {
+          // フレーム box の EMU 境界 (近似): fromCol-1, fromRow-1 から 18 cols × 23 rows
+          const fFromCol = frame.labelCol - 1; // 0-indexed
+          const fFromRow = frame.labelRow - 1;
+          const fLeft = fFromCol * COL_EMU_DEFAULT;
+          const fTop = fFromRow * ROW_EMU_DEFAULT;
+          const fRight = (fFromCol + 19) * COL_EMU_DEFAULT;
+          const fBottom = (fFromRow + 24) * ROW_EMU_DEFAULT;
+          // 重心が box 内なら即採用
+          if (cx >= fLeft && cx <= fRight && cy >= fTop && cy <= fBottom) {
+            bestFrame = frame;
+            break;
+          }
+          // 外なら中心距離最短のフレームに寄せる (念のため)
+          const fcx = (fLeft + fRight) / 2;
+          const fcy = (fTop + fBottom) / 2;
+          const d = Math.hypot(cx - fcx, cy - fcy);
+          if (d < bestDist) { bestDist = d; bestFrame = frame; }
+        }
+        if (bestFrame) bestFrame.shapes.push(shape);
+      }
+      const withShapes = frames.filter(f => f.shapes.length > 0).length;
+      console.log(`[shapes] assigned to ${withShapes} frames`);
+    }
+
+    // 写真 + 図形を合成して dataUrl を返す
+    async function compositePhotoWithShapes(photo) {
+      if (!photo.imageBase64 || !photo.shapes || photo.shapes.length === 0) {
+        return photo.imageBase64;
+      }
+      try {
+        const img = new Image();
+        await new Promise((resolve, reject) => {
+          img.onload = resolve; img.onerror = reject; img.src = photo.imageBase64;
+        });
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+
+        // フレームの EMU box
+        const fFromCol = photo.labelCol - 1;
+        const fFromRow = photo.labelRow - 1;
+        const fLeft = fFromCol * COL_EMU_DEFAULT;
+        const fTop = fFromRow * ROW_EMU_DEFAULT;
+        const fWidth = 18 * COL_EMU_DEFAULT;  // 画像が占める typical 幅
+        const fHeight = 22 * ROW_EMU_DEFAULT; // 画像が占める typical 高さ
+        // 画像は実際はフレーム内で中央寄せされているが、近似としてフレーム全体を画像として扱う
+        // (少し大きめの box で shape 座標を正規化)
+
+        for (const shape of photo.shapes) {
+          drawShapeOnCanvas(ctx, shape, fLeft, fTop, fWidth, fHeight, canvas.width, canvas.height);
+        }
+        return canvas.toDataURL('image/jpeg', 0.9);
+      } catch (err) {
+        console.warn('[shapes] composite failed:', err);
+        return photo.imageBase64;
+      }
+    }
+
+    function drawShapeOnCanvas(ctx, shape, frameLeft, frameTop, frameW, frameH, canvasW, canvasH) {
+      // EMU → canvas px 変換
+      const emuToPx = (emuX, emuY) => ({
+        x: (emuX - frameLeft) / frameW * canvasW,
+        y: (emuY - frameTop) / frameH * canvasH
+      });
+
+      // Shape の sheet EMU box
+      const sLeft = emuFromAnchor(shape, 'left');
+      const sTop = emuFromAnchor(shape, 'top');
+      const sRight = emuFromAnchor(shape, 'right');
+      const sBottom = emuFromAnchor(shape, 'bottom');
+
+      const tl = emuToPx(sLeft, sTop);
+      const br = emuToPx(sRight, sBottom);
+      const w = br.x - tl.x;
+      const h = br.y - tl.y;
+
+      // 色変換 (RRGGBB → #RRGGBB、未設定はデフォルト赤)
+      const lineC = shape.lineColor ? `#${shape.lineColor}` : '#FF0000';
+      // 線幅 EMU → px: 12700 EMU = 1 pt ≈ 2 px at 150dpi scale.
+      // canvas 座標系では単純に frameW 比で換算せず、固定 ~2px にする (写真内で見やすく)
+      const lineW_px = Math.max(1.5, Math.min(4, (shape.lineW_emu || 12700) / 6000));
+
+      ctx.save();
+      ctx.strokeStyle = lineC;
+      ctx.lineWidth = lineW_px;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      if (shape.kind === 'rect' || shape.kind === 'roundRect') {
+        ctx.strokeRect(tl.x, tl.y, w, h);
+      } else if (shape.kind === 'ellipse') {
+        ctx.beginPath();
+        ctx.ellipse(tl.x + w / 2, tl.y + h / 2, Math.abs(w / 2), Math.abs(h / 2), 0, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (shape.kind === 'line' || shape.kind === 'straightConnector1') {
+        ctx.beginPath();
+        ctx.moveTo(tl.x, tl.y);
+        ctx.lineTo(br.x, br.y);
+        ctx.stroke();
+      } else if (shape.kind === 'custGeom' && shape.pathData) {
+        drawCustGeom(ctx, shape.pathData, tl.x, tl.y, w, h);
+      }
+
+      ctx.restore();
+    }
+
+    function drawCustGeom(ctx, pathData, ox, oy, ow, oh) {
+      const scaleX = ow / pathData.pathW;
+      const scaleY = oh / pathData.pathH;
+      const toPx = (pt) => ({ x: ox + pt.x * scaleX, y: oy + pt.y * scaleY });
+      ctx.beginPath();
+      for (const cmd of pathData.cmds) {
+        if (cmd.type === 'moveTo' && cmd.pts.length >= 1) {
+          const p = toPx(cmd.pts[0]);
+          ctx.moveTo(p.x, p.y);
+        } else if (cmd.type === 'lnTo' && cmd.pts.length >= 1) {
+          const p = toPx(cmd.pts[0]);
+          ctx.lineTo(p.x, p.y);
+        } else if (cmd.type === 'cubicBezTo' && cmd.pts.length >= 3) {
+          const c1 = toPx(cmd.pts[0]);
+          const c2 = toPx(cmd.pts[1]);
+          const p = toPx(cmd.pts[2]);
+          ctx.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, p.x, p.y);
+        } else if (cmd.type === 'close') {
+          ctx.closePath();
+        }
+      }
+      ctx.stroke();
+    }
+
+    // ============================
     // 擁壁テンプレート用 Photo(2) パーサー
     // ============================
     //
@@ -4996,6 +5286,30 @@
       const withComment = photoData.filter(e => e.comment.trim() !== '').length;
       console.log(`[RetainingWall] frames=${photoData.length} withPathString=${withPath} embedded=${withEmbed} withComment=${withComment}`);
 
+      // ★ Excel で描かれた非画像オブジェクト (矢印/マル/フリーフォーム等) を抽出して
+      //   該当フレームに割り当て → 合成画像を非同期で生成 → photo.compositeDataUrl に保存
+      //   (ロード時に実行。UI ブロックしないよう非同期)
+      if (originalZipBuffer) {
+        extractPhotoSheetShapes(originalZipBuffer).then(shapes => {
+          if (shapes.length === 0) return;
+          assignShapesToFrames(shapes, photoData);
+          // 図形付きフレームの合成画像を順次生成
+          (async () => {
+            let composed = 0;
+            for (const photo of photoData) {
+              if (!photo.shapes || photo.shapes.length === 0) continue;
+              if (!photo.imageBase64) continue;
+              photo.compositeDataUrl = await compositePhotoWithShapes(photo);
+              composed++;
+            }
+            if (composed > 0) {
+              console.log(`[shapes] composited ${composed} frames → re-render`);
+              renderPhotoGrid();
+            }
+          })();
+        });
+      }
+
       // IDB写真ストアから欠落分を復元
       restorePhotosFromIDB();
       // IDB annotation ストアから欠落分を復元
@@ -5111,13 +5425,20 @@
 
         // パス文字列枠 (擁壁テンプレートで元写真がPC上のZ:\に残っている状態)
         const isLinkLost = !photo.imageBase64 && photo.pathString;
+        // Excel 図形 (矢印/マル等) 合成済みなら compositeDataUrl を優先
+        const displayImage = photo.compositeDataUrl || photo.imageBase64;
+        const hasShapes = photo.shapes && photo.shapes.length > 0;
 
+        const needsFilenameLine = photo.filename || isLinkLost || hasShapes;
+        const fileLineHtml = needsFilenameLine
+          ? `<div class="photo-filename">${photo.filename ? escapeHtml(photo.filename) : ''}${isLinkLost ? ' <span class="photo-link-lost">(link lost)</span>' : ''}${hasShapes ? ` <span class="photo-shape-badge" title="Excel 図形 ${photo.shapes.length} 個">✏︎${photo.shapes.length}</span>` : ''}</div>`
+          : '';
         card.innerHTML = `
-          ${photo.filename ? `<div class="photo-filename">${escapeHtml(photo.filename)}${isLinkLost ? ' <span class="photo-link-lost">(link lost)</span>' : ''}</div>` : ''}
+          ${fileLineHtml}
           <div class="photo-frame" onclick="showActionSheet(${index})">
             <span class="${labelClass}">${escapeHtml(photo.label)}</span>
-            ${photo.imageBase64
-              ? `<img src="${photo.imageBase64}" alt="${escapeHtml(photo.label)}">`
+            ${displayImage
+              ? `<img src="${displayImage}" alt="${escapeHtml(photo.label)}">`
               : isLinkLost
                 ? `<div class="placeholder placeholder-link-lost">
                      <span class="placeholder-icon">[!]</span>
