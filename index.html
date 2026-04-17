@@ -7796,12 +7796,14 @@
         btnOverlay.style.background = 'rgba(255,255,255,0.35)';
         btnSplit.style.background = 'rgba(255,255,255,0.15)';
       } else {
-        // 並列: video と ghost を flex で分割。画面向きで縦/横自動
-        const landscape = window.innerWidth > window.innerHeight;
-        stage.style.flexDirection = landscape ? 'row' : 'column';
+        // 並列: 各パネルがデバイス向きと同じ縦横比になるように分割方向を決める
+        //   縦デバイス  → row (左右分割、各パネル=縦長 = ポートレート撮影に最適)
+        //   横デバイス → column (上下分割、各パネル=横長 = ランドスケープ撮影に最適)
+        const portrait = window.innerHeight >= window.innerWidth;
+        stage.style.flexDirection = portrait ? 'row' : 'column';
         ghostOverlay.style.display = 'none';
         ghostPanel.style.display = 'block';
-        opacityWrap.style.display = 'none'; // 並列では透明度不要
+        opacityWrap.style.display = 'none';
         btnOverlay.style.background = 'rgba(255,255,255,0.15)';
         btnSplit.style.background = 'rgba(255,255,255,0.35)';
       }

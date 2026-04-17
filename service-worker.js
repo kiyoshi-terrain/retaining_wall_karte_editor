@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v12-camera-split';
+const CACHE_NAME = 'rw-karte-v13-split-orient';
 const ASSETS = [
   './',
   './index.html',
