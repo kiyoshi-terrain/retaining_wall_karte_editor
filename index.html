@@ -1808,6 +1808,16 @@
       <span class="menu-label">Drive ↑</span>
       <span class="menu-hint">Upload to Google Drive</span>
     </button>
+    <button class="menu-sheet-btn" onclick="closeMenuSheet(); saveToGoogleDriveAs();" id="menu-drive-as-btn">
+      <span class="menu-icon">[+↑]</span>
+      <span class="menu-label">Drive ↑ (as...)</span>
+      <span class="menu-hint">Upload as new file (custom name)</span>
+    </button>
+    <button class="menu-sheet-btn" onclick="toggleDriveAutoBackup()" id="menu-drive-autobackup-btn">
+      <span class="menu-icon">[⟳]</span>
+      <span class="menu-label">Drive auto-backup</span>
+      <span class="menu-hint" id="menu-drive-autobackup-hint">OFF</span>
+    </button>
     <button class="menu-sheet-btn" onclick="closeMenuSheet(); saveFileAs();" id="menu-save-as-btn" style="display:none;">
       <span class="menu-icon">[+]</span>
       <span class="menu-label">Save As</span>
@@ -2889,6 +2899,24 @@
         }
         // GDrive保存成功 → リトライキューをドレイン（前回失敗分を再送）
         drainDriveRetryQueue();
+
+        // ★ 自動タイムスタンプバックアップ (トグル ON の時のみ)
+        //   同じ親フォルダに "元ファイル名_YYYYMMDD_HHMMSS.xlsx" として追加アップ
+        //   失敗しても通常保存は成功しているので silent warn
+        if (isDriveAutoBackupEnabled()) {
+          try {
+            const backupName = timestampedFilename(filename);
+            const targetFolder = driveParentFolderId || GDRIVE_SHARED_FOLDER_ID || null;
+            if (targetFolder) {
+              await uploadNewFileToDrive(targetFolder, backupName, driveBlob);
+              console.log(`[drive-auto-backup] uploaded ${backupName}`);
+              setStatus(`Saved + backup: ${backupName}`, filename);
+            }
+          } catch (bkErr) {
+            console.warn('[drive-auto-backup] failed:', bkErr);
+          }
+        }
+
         hideLoading();
       } catch (err) {
         console.error('Drive upload error:', err);
@@ -2897,6 +2925,109 @@
       } finally {
         isSaving = false;
       }
+    }
+
+    // ============================
+    // Save As to Google Drive (別名で新規アップロード、元ファイルは上書きしない)
+    // ============================
+    async function saveToGoogleDriveAs() {
+      if (!GDRIVE_CLIENT_ID) {
+        alert('Google Drive is not configured.');
+        return;
+      }
+      if (!workbook) return;
+      if (isSaving) return;
+
+      // 提案ファイル名: 元ファイル名_YYYYMMDD_HHMMSS.xlsx
+      const suggested = timestampedFilename(currentFileName || 'retaining_wall_karte.xlsx');
+      const input = prompt('Drive にアップロードする新しいファイル名 (.xlsx):', suggested);
+      if (!input) return;
+      const newFilename = /\.xlsx$/i.test(input) ? input : input + '.xlsx';
+
+      isSaving = true;
+      showLoading('Uploading as new file to Drive...');
+
+      try {
+        await ensureGdriveToken();
+        const blob = await prepareAndBuildBlob();
+        const contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        const driveBlob = lastPlainBuffer
+          ? new Blob([lastPlainBuffer], { type: contentType })
+          : blob;
+
+        // 保存先フォルダ: 現在の親フォルダ優先、なければ設定 or fallback
+        let targetFolderId;
+        if (driveParentFolderId) {
+          targetFolderId = driveParentFolderId;
+        } else if (GDRIVE_SHARED_FOLDER_ID) {
+          targetFolderId = GDRIVE_SHARED_FOLDER_ID;
+        } else {
+          const rootId = await getOrCreateDriveFolder('RetainingWallKarte');
+          targetFolderId = await getOrCreateDriveFolder('Karte', rootId);
+        }
+
+        const result = await uploadNewFileToDrive(targetFolderId, newFilename, driveBlob);
+        console.log(`[save-as-drive] uploaded ${newFilename} as ${result.id}`);
+        setStatus(`Uploaded as new: ${newFilename}`, '');
+        alert(`"${newFilename}" として Drive にアップロードしました。\n元ファイルは上書きされていません。`);
+      } catch (err) {
+        console.error('Save As to Drive failed:', err);
+        alert('Drive アップロード失敗: ' + err.message);
+      } finally {
+        isSaving = false;
+        hideLoading();
+      }
+    }
+
+    // 共通: 新規ファイルとして Drive にアップロード (driveFileId は更新しない)
+    async function uploadNewFileToDrive(folderId, filename, blob) {
+      const contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const metadata = {
+        name: filename,
+        mimeType: contentType,
+        parents: [folderId]
+      };
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+      form.append('file', blob);
+      const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${gdriveAccessToken}` },
+        body: form
+      });
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      return await res.json();
+    }
+
+    // 共通: ファイル名にタイムスタンプを付ける
+    function timestampedFilename(filename) {
+      const now = new Date();
+      const ts = now.getFullYear()
+        + String(now.getMonth() + 1).padStart(2, '0')
+        + String(now.getDate()).padStart(2, '0')
+        + '_'
+        + String(now.getHours()).padStart(2, '0')
+        + String(now.getMinutes()).padStart(2, '0')
+        + String(now.getSeconds()).padStart(2, '0');
+      return filename.replace(/\.xlsx$/i, `_${ts}.xlsx`);
+    }
+
+    // ============================
+    // Drive 自動バックアップトグル (localStorage 永続)
+    // ============================
+    const DRIVE_AUTO_BACKUP_KEY = 'retainingWallKarteDriveAutoBackup';
+    function isDriveAutoBackupEnabled() {
+      return localStorage.getItem(DRIVE_AUTO_BACKUP_KEY) === '1';
+    }
+    function toggleDriveAutoBackup() {
+      const now = !isDriveAutoBackupEnabled();
+      localStorage.setItem(DRIVE_AUTO_BACKUP_KEY, now ? '1' : '0');
+      updateDriveAutoBackupMenuLabel();
+      alert(`自動 Drive バックアップ: ${now ? 'ON' : 'OFF'}\n(通常の Drive 保存時に別名コピーを同じフォルダに追加)`);
+    }
+    function updateDriveAutoBackupMenuLabel() {
+      const el = document.getElementById('menu-drive-autobackup-hint');
+      if (el) el.textContent = isDriveAutoBackupEnabled() ? 'ON (timestamped copy)' : 'OFF';
     }
 
     // 現在地を取得（Promise化、タイムアウト付き）
@@ -7116,6 +7247,8 @@
     function openMenuSheet() {
       document.getElementById('menu-backdrop').classList.add('active');
       document.getElementById('menu-sheet').classList.add('active');
+      // 自動バックアップトグルのラベル更新 (localStorage 反映)
+      try { updateDriveAutoBackupMenuLabel(); } catch (_) {}
     }
     function closeMenuSheet() {
       document.getElementById('menu-backdrop').classList.remove('active');
