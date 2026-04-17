@@ -1831,10 +1831,10 @@
       <span class="menu-label">Drive auto-backup</span>
       <span class="menu-hint" id="menu-drive-autobackup-hint">OFF</span>
     </button>
-    <button class="menu-sheet-btn" onclick="closeMenuSheet(); saveFileAs();" id="menu-save-as-btn" style="display:none;">
+    <button class="menu-sheet-btn" onclick="closeMenuSheet(); saveFileAs();" id="menu-save-as-btn">
       <span class="menu-icon">[+]</span>
-      <span class="menu-label">Save As</span>
-      <span class="menu-hint">Choose location</span>
+      <span class="menu-label">Save As (local)</span>
+      <span class="menu-hint">New filename (local + IDB)</span>
     </button>
     <button class="menu-sheet-btn" onclick="closeMenuSheet(); downloadAllPhotosAsZip();">
       <span class="menu-icon">[IMG]</span>
@@ -4558,8 +4558,8 @@
         fileSelect.style.display = 'none';
         editor.style.display = 'block';
         headerActions.style.display = 'flex';
-        // ファイルハンドルがある場合は「別名保存」ボタンを表示
-        document.getElementById('menu-save-as-btn').style.display = fileHandle ? 'block' : 'none';
+        // Save As は iPad/Safari でも常時利用可能 (showSaveFilePicker 非対応時は prompt フォールバック)
+        document.getElementById('menu-save-as-btn').style.display = 'block';
         statusBar.classList.add('active');
         
         renderSheetTabs();
@@ -9301,8 +9301,61 @@
           isSaving = false;
         }
       } else {
-        // フォールバック: 通常のダウンロード
-        saveFile();
+        // ★ showSaveFilePicker 非対応 (iPad Safari 等): prompt で名前入力 → IDB + ダウンロード
+        await saveFileAsLocalFallback();
+      }
+    }
+
+    // iPad Safari 等で使えるローカル別名保存
+    async function saveFileAsLocalFallback() {
+      if (isSaving) return;
+      const suggested = timestampedFilename(currentFileName || 'retaining_wall_karte.xlsx');
+      const input = prompt('ローカルに保存する新しいファイル名 (.xlsx):', suggested);
+      if (!input) return;
+      const newFilename = /\.xlsx$/i.test(input) ? input : input + '.xlsx';
+
+      isSaving = true;
+      showLoading('Saving as new...');
+      try {
+        const blob = await prepareAndBuildBlob();
+        const contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        const plainBlob = lastPlainBuffer
+          ? new Blob([lastPlainBuffer], { type: contentType })
+          : blob;
+
+        // 保存前検証
+        await validateXlsxBlob(plainBlob, 'save-as-local');
+
+        // IDB に新ファイル名で保存 (メインストア + バックアップ)
+        await idbSaveBackup(newFilename, plainBlob);
+        await idbSave(newFilename, plainBlob);
+
+        // Capacitor ネイティブ (iOS/Android アプリ版)
+        if (isNative && CapFilesystem) {
+          try { await capSaveFile(newFilename, blob); } catch (err) { console.warn('Cap save failed:', err); }
+        }
+
+        // ブラウザダウンロード (iPad Safari でも動作)
+        downloadBlob(blob, newFilename);
+
+        // currentFileName を更新 (以降の Save は新名で)
+        currentFileName = newFilename;
+        const fnEl = document.getElementById('current-file-name');
+        if (fnEl) fnEl.textContent = newFilename;
+        hasUnsavedChanges = false;
+        photoData.forEach(p => p.isModified = false);
+        for (const ad of Object.values(annotationData || {})) {
+          if (ad) ad.isModified = false;
+        }
+
+        setStatus('Saved as (local)', newFilename);
+        alert(`"${newFilename}" としてローカル + IDB に保存しました。\nダウンロード済みのファイルを Files / Photos 等に移動できます。`);
+      } catch (err) {
+        console.error('Save As Local failed:', err);
+        alert('Save failed: ' + err.message);
+      } finally {
+        isSaving = false;
+        hideLoading();
       }
     }
 

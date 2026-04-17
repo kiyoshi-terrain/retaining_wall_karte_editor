@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v8-render-shapes';
+const CACHE_NAME = 'rw-karte-v9-save-as-local';
 const ASSETS = [
   './',
   './index.html',
