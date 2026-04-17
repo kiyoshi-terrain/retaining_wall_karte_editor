@@ -7786,9 +7786,15 @@
       const btnOverlay = document.getElementById('overlay-camera-mode-overlay');
       const btnSplit = document.getElementById('overlay-camera-mode-split');
 
+      const video = document.getElementById('overlay-camera-video');
+      const ghostSplit = document.getElementById('overlay-camera-ghost-split');
+
       if (mode === 'overlay') {
         // 重ねる: video 単体 + ghost を video 上に絶対配置
+        //   この時は cover で枠いっぱいに表示 (ghost も同じ cover で揃う)
         stage.style.flexDirection = 'column';
+        video.style.objectFit = 'cover';
+        ghostOverlay.style.objectFit = 'cover';
         ghostOverlay.style.display = 'block';
         ghostOverlay.style.visibility = 'visible';
         ghostPanel.style.display = 'none';
@@ -7796,11 +7802,14 @@
         btnOverlay.style.background = 'rgba(255,255,255,0.35)';
         btnSplit.style.background = 'rgba(255,255,255,0.15)';
       } else {
-        // 並列: 各パネルがデバイス向きと同じ縦横比になるように分割方向を決める
-        //   縦デバイス  → row (左右分割、各パネル=縦長 = ポートレート撮影に最適)
-        //   横デバイス → column (上下分割、各パネル=横長 = ランドスケープ撮影に最適)
+        // 並列: LIVE と PREVIOUS を同条件で比較できるように両方 contain に統一。
+        //   カメラのフル画角 (切り取りなし) と前回写真全体を同じレターボックスで並べる。
+        //   分割方向はデバイス向きに合わせる (縦→row / 横→column)
         const portrait = window.innerHeight >= window.innerWidth;
         stage.style.flexDirection = portrait ? 'row' : 'column';
+        video.style.objectFit = 'contain';
+        video.style.background = '#111';
+        ghostSplit.style.objectFit = 'contain';
         ghostOverlay.style.display = 'none';
         ghostPanel.style.display = 'block';
         opacityWrap.style.display = 'none';
