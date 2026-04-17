@@ -324,6 +324,20 @@
       border-style: inset;
     }
 
+    .idb-btn-restore {
+      background: #ffeb99;
+      border: 2px outset #fff;
+      padding: 4px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      color: #000;
+      font-weight: 700;
+    }
+
+    .idb-btn-restore:active {
+      border-style: inset;
+    }
+
     /* Google Drive ボタン */
     .drive-open-btn {
       display: flex;
@@ -1977,10 +1991,11 @@
     // IndexedDB ローカル保存（ダウンロードバーなし）
     // ============================
     const IDB_NAME = 'RetainingWallKarteDB';
-    const IDB_VERSION = 3;
+    const IDB_VERSION = 4;
     const IDB_STORE = 'files';
     const IDB_PHOTO_STORE = 'photos';
     const IDB_ANNOTATION_STORE = 'annotations';
+    const IDB_BACKUP_STORE = 'backups';
 
     // ============================
     // Web Locks: 他タブとの排他制御
@@ -2033,8 +2048,22 @@
           if (!db.objectStoreNames.contains(IDB_ANNOTATION_STORE)) {
             db.createObjectStore(IDB_ANNOTATION_STORE, { keyPath: 'key' });
           }
+          if (!db.objectStoreNames.contains(IDB_BACKUP_STORE)) {
+            const backupStore = db.createObjectStore(IDB_BACKUP_STORE, { keyPath: 'key' });
+            backupStore.createIndex('filename', 'filename', { unique: false });
+          }
         };
-        req.onsuccess = () => resolve(req.result);
+        req.onsuccess = () => {
+          const db = req.result;
+          // 他タブがスキーマアップグレードを要求したら、現接続を閉じてリロード促す
+          db.onversionchange = () => {
+            try { db.close(); } catch (_) {}
+            if (!document.hidden) {
+              alert('アプリが更新されました。リロードしてください。');
+            }
+          };
+          resolve(db);
+        };
         req.onerror = () => reject(req.error);
       });
     }
@@ -2764,6 +2793,33 @@
         const driveBlob = lastPlainBuffer
           ? new Blob([lastPlainBuffer], { type: contentType })
           : blob;
+
+        // ★ 保存前検証 — 壊れた blob で Drive を上書きさせない
+        //   検証失敗時はローカル(IDB)バックアップのみ残し、ユーザーに「強制アップロード」の
+        //   エスケープハッチを提供する (誤検出で field で save できなくなるリスク回避)
+        try {
+          await validateXlsxBlob(driveBlob, 'gdrive');
+        } catch (validateErr) {
+          console.error('[saveToGoogleDrive] validation failed:', validateErr);
+          await idbSaveBackup(filename, driveBlob); // とりあえずローカルに退避
+          hideLoading();
+          isSaving = false;
+          const confirmMsg =
+            '検証に失敗しました:\n' + validateErr.message + '\n\n' +
+            'Drive へのアップロードを中止しました。\n' +
+            'ローカル (IDB) にはバックアップが残っています。\n\n' +
+            'それでも強制アップロードする場合は "OK" と入力してください\n' +
+            '(誤操作防止のため):';
+          const typed = prompt(confirmMsg, '');
+          if (typed !== 'OK') {
+            setStatus('Drive upload cancelled (validation failed)', filename);
+            return;
+          }
+          // 強制アップロードに進む: isSaving を再度立てる
+          isSaving = true;
+          showLoading('Force-uploading (validation bypassed)...');
+        }
+        await idbSaveBackup(filename, driveBlob);
 
         if (driveFileId) {
           // 既にDriveファイル → 上書き
@@ -4388,8 +4444,22 @@
         hideLoading();
       } catch (error) {
         console.error('Error loading Excel:', error);
-        alert('Failed to load file: ' + error.message);
         hideLoading();
+        // ★ 読み込み失敗時: バックアップがあれば復元を提案
+        try {
+          const backups = await idbListBackups(file.name);
+          if (backups.length > 0) {
+            const msg =
+              `ファイル読み込みに失敗しました:\n${error.message}\n\n` +
+              `「${file.name}」のバックアップが ${backups.length} 件あります。\n` +
+              `復元ダイアログを開きますか？`;
+            if (confirm(msg)) {
+              showRestoreSheet(file.name);
+              return;
+            }
+          }
+        } catch (e) { /* ignore */ }
+        alert('Failed to load file: ' + error.message);
       }
     }
 
@@ -8243,6 +8313,206 @@
       });
     }
 
+    // ============================
+    // 保存前 Excel 検証 (多層防御)
+    // ============================
+    // ビルドした buffer/blob が xlsx として壊れていないか、実際に JSZip で開いて検証。
+    // 壊れていたら保存を中止し、既存ファイル(ローカル/GDrive)は一切触らない。
+    //
+    // 検証項目:
+    //   1. サイズが 4KB 以上 (空テンプレでも 10KB 超える)
+    //   2. ZIP として開ける
+    //   3. [Content_Types].xml が存在し spreadsheetml を含む
+    //   4. xl/workbook.xml が存在し <sheet> を 1つ以上含む
+    //   5. workbook.xml.rels が存在
+    //   6. workbook で参照されている全てのシート XML が存在
+    //   7. drawing が参照されていれば drawing XML も存在
+    // rels の Target (相対パス, '../drawings/x.xml' 等) を rels ファイルの親ディレクトリ基準に解決して
+    // zip 内の絶対パス (xl/worksheets/...) を返す
+    function resolveRelPath(relsPath, target) {
+      // relsPath: e.g. "xl/worksheets/_rels/sheet1.xml.rels"
+      //   親ディレクトリ = "xl/worksheets/_rels" の親 = "xl/worksheets"
+      // target: e.g. "../drawings/drawing1.xml" → "xl/drawings/drawing1.xml"
+      const relsDir = relsPath.split('/').slice(0, -1).join('/'); // "xl/worksheets/_rels"
+      const baseDir = relsDir.replace(/\/_rels$/, '');            // "xl/worksheets"
+      const parts = (baseDir ? baseDir.split('/') : []);
+      for (const seg of target.split('/')) {
+        if (seg === '..') parts.pop();
+        else if (seg === '.' || seg === '') continue;
+        else parts.push(seg);
+      }
+      return parts.join('/');
+    }
+
+    async function validateXlsxBlob(blob, label) {
+      const tag = label ? `[validate:${label}]` : '[validate]';
+      if (!blob || blob.size < 4096) {
+        throw new Error(`${tag} suspiciously small: ${blob?.size ?? 0} bytes`);
+      }
+      let zip;
+      try {
+        const ab = await blob.arrayBuffer();
+        zip = await JSZip.loadAsync(ab);
+      } catch (err) {
+        throw new Error(`${tag} not a valid ZIP: ${err.message}`);
+      }
+      const must = ['[Content_Types].xml', 'xl/workbook.xml', 'xl/_rels/workbook.xml.rels'];
+      for (const f of must) {
+        if (!zip.files[f]) throw new Error(`${tag} missing required part: ${f}`);
+      }
+      const ct = await zip.files['[Content_Types].xml'].async('string');
+      if (!/spreadsheetml/i.test(ct)) throw new Error(`${tag} Content_Types has no spreadsheetml`);
+      const wb = await zip.files['xl/workbook.xml'].async('string');
+      const sheetMatches = wb.match(/<sheet\s/g);
+      if (!sheetMatches || sheetMatches.length === 0) {
+        throw new Error(`${tag} workbook has no <sheet> entries`);
+      }
+      // シート rels → 各シート XML の存在
+      const wbRels = await zip.files['xl/_rels/workbook.xml.rels'].async('string');
+      const sheetRelMatches = [...wbRels.matchAll(/<Relationship[^>]+Target="([^"]+worksheets\/sheet[^"]+)"/g)];
+      for (const m of sheetRelMatches) {
+        const sheetTarget = resolveRelPath('xl/_rels/workbook.xml.rels', m[1]);
+        if (!zip.files[sheetTarget]) {
+          throw new Error(`${tag} missing worksheet XML referenced by rels: ${sheetTarget}`);
+        }
+      }
+      // sharedStrings: workbook.xml.rels で参照されていれば存在必須
+      if (/Target="[^"]*sharedStrings\.xml"/.test(wbRels) && !zip.files['xl/sharedStrings.xml']) {
+        throw new Error(`${tag} missing xl/sharedStrings.xml referenced by workbook rels`);
+      }
+      // drawing の整合 + ★ アンカータグ数の対称性 (昨日の regex 削除バグを直撃で検出)
+      for (const [path, f] of Object.entries(zip.files)) {
+        if (!/^xl\/worksheets\/_rels\/.+\.rels$/.test(path)) continue;
+        const relXml = await f.async('string');
+        const drawMatch = relXml.match(/Target="([^"]*drawings\/[^"]+)"/);
+        if (drawMatch) {
+          const drawPath = resolveRelPath(path, drawMatch[1]);
+          if (!zip.files[drawPath]) {
+            throw new Error(`${tag} missing drawing XML referenced by ${path}: ${drawPath}`);
+          }
+          const drawXml = await zip.files[drawPath].async('string');
+          const openCount  = (drawXml.match(/<xdr:twoCellAnchor\b/g)  || []).length;
+          const closeCount = (drawXml.match(/<\/xdr:twoCellAnchor>/g) || []).length;
+          if (openCount !== closeCount) {
+            throw new Error(`${tag} unbalanced twoCellAnchor in ${drawPath}: open=${openCount} close=${closeCount}`);
+          }
+          // drawing rels → media の存在
+          const drawRelsPath = drawPath.replace('drawings/', 'drawings/_rels/') + '.rels';
+          if (zip.files[drawRelsPath]) {
+            const drawRels = await zip.files[drawRelsPath].async('string');
+            const mediaMatches = [...drawRels.matchAll(/Target="([^"]*media\/[^"]+)"/g)];
+            for (const mm of mediaMatches) {
+              const mediaPath = resolveRelPath(drawRelsPath, mm[1]);
+              if (!zip.files[mediaPath]) {
+                throw new Error(`${tag} missing media referenced by ${drawRelsPath}: ${mediaPath}`);
+              }
+            }
+          }
+        }
+      }
+      console.log(`${tag} OK (size=${blob.size}, sheets=${sheetMatches.length})`);
+      return true;
+    }
+
+    // ============================
+    // IDB ローリングバックアップ (直近N版を保持、専用 store)
+    // ============================
+    const IDB_BACKUP_MAX = 5;
+
+    function backupKeyFor(filename, ts) {
+      return `${filename}::${ts}`;
+    }
+
+    // put + prune を 1 トランザクションで。失敗しても save パイプラインは止めない。
+    async function idbSaveBackup(filename, blob) {
+      try {
+        const db = await openIDB();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(IDB_BACKUP_STORE, 'readwrite');
+          const store = tx.objectStore(IDB_BACKUP_STORE);
+          const index = store.index('filename');
+          const now = Date.now();
+          // put 新規バックアップ
+          store.put({
+            key: backupKeyFor(filename, now),
+            filename,
+            blob,
+            savedAt: new Date(now).toISOString(),
+            size: blob.size
+          });
+          // 該当 filename の既存バックアップ列挙 → 新しい順に並べて MAX を超えた分を delete
+          const collected = [];
+          const req = index.openCursor(IDBKeyRange.only(filename));
+          req.onsuccess = (e) => {
+            const cursor = e.target.result;
+            if (cursor) {
+              collected.push({ key: cursor.value.key, savedAt: cursor.value.savedAt });
+              cursor.continue();
+            } else {
+              // 新規を含めて最新順ソート (new entry は既に put 済み = 含まれる)
+              const sorted = collected
+                .concat([{ key: backupKeyFor(filename, now), savedAt: new Date(now).toISOString() }])
+                // 同じ key があれば重複除去
+                .filter((v, i, a) => a.findIndex(x => x.key === v.key) === i)
+                .sort((a, b) => (b.savedAt || '').localeCompare(a.savedAt || ''));
+              const toDelete = sorted.slice(IDB_BACKUP_MAX);
+              toDelete.forEach(r => store.delete(r.key));
+            }
+          };
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+        db.close();
+        console.log(`[idbSaveBackup] ${filename} saved (rolling max=${IDB_BACKUP_MAX})`);
+      } catch (err) {
+        console.warn('idbSaveBackup failed:', err);
+      }
+    }
+
+    async function idbListBackups(filename) {
+      try {
+        const db = await openIDB();
+        return await new Promise((resolve, reject) => {
+          const tx = db.transaction(IDB_BACKUP_STORE, 'readonly');
+          const store = tx.objectStore(IDB_BACKUP_STORE);
+          const index = store.index('filename');
+          const req = index.getAll(IDBKeyRange.only(filename));
+          req.onsuccess = () => {
+            db.close();
+            const list = (req.result || [])
+              .map(r => ({ key: r.key, savedAt: r.savedAt, size: r.size }))
+              .sort((a, b) => (b.savedAt || '').localeCompare(a.savedAt || ''));
+            resolve(list);
+          };
+          req.onerror = () => { db.close(); reject(req.error); };
+        });
+      } catch (err) {
+        console.warn('idbListBackups failed:', err);
+        return [];
+      }
+    }
+
+    async function idbLoadBackup(key) {
+      const db = await openIDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_BACKUP_STORE, 'readonly');
+        const store = tx.objectStore(IDB_BACKUP_STORE);
+        const req = store.get(key);
+        req.onsuccess = () => { db.close(); resolve(req.result || null); };
+        req.onerror = () => { db.close(); reject(req.error); };
+      });
+    }
+
+    async function idbRestoreBackup(filename, key) {
+      const rec = await idbLoadBackup(key);
+      if (!rec || !rec.blob) throw new Error('バックアップが見つかりません');
+      // 復元前に整合性確認 (壊れたバックアップを active にしない)
+      await validateXlsxBlob(rec.blob, 'restore');
+      await idbSave(filename, rec.blob);
+      console.log(`[idbRestoreBackup] ${filename} <= ${key}`);
+      return rec.blob;
+    }
+
     // ファイル保存
     async function saveFile() {
       if (isSaving) return; // 連打防止
@@ -8252,6 +8522,29 @@
       try {
         const blob = await prepareAndBuildBlob();
         const filename = currentFileName || 'slope_karte.xlsx';
+
+        // ★ 保存前検証 (多層防御)
+        //   ビルドした blob/plain buffer を JSZip で開いて構造チェック。
+        //   1つでも欠陥があれば throw → ローカル/GDrive 上書きを一切行わない。
+        //   既存ファイルは絶対に壊れない。
+        const plainBlob = lastPlainBuffer
+          ? new Blob([lastPlainBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+          : blob;
+        await validateXlsxBlob(plainBlob, 'plain');
+        if (appPIN) {
+          // 暗号化済み blob も最低限 (サイズだけ) チェック。中身は暗号化されているので
+          // 構造検証は不可だが、4KB 未満は異常。
+          if (!blob || blob.size < 4096) {
+            throw new Error(`Encrypted blob suspiciously small: ${blob?.size ?? 0} bytes`);
+          }
+        }
+
+        // ★ バックアップ (ローリング 5世代 in IDB) — 上書き前に保存
+        await idbSaveBackup(filename, plainBlob);
+
+        // ★ Save ボタンは GDrive を触らない (user 要望, 2026-04-17)
+        //   理由: Save は高頻度操作で、バグがあった場合 Drive 上のファイルが巻き添えになる。
+        //   Drive 上書きはメニュー「Save to Google Drive」でのみ明示実行する。
 
         // 1. Capacitorネイティブ保存
         if (isNative && CapFilesystem) {
@@ -8263,24 +8556,7 @@
           }
         }
 
-        // 2. Google Drive上書き保存（常にプレーンバッファを使用）
-        // xlsx-populateの暗号化/復号ラウンドトリップで画像データが壊れるため、
-        // GDriveにはプレーン（非暗号化）バッファをアップロードする
-        // GDriveのセキュリティはGoogle認証とフォルダ権限で担保される
-        if (driveFileId) {
-          try {
-            const driveBlob = lastPlainBuffer
-              ? new Blob([lastPlainBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
-              : blob;
-            await uploadToDrive(driveFileId, driveBlob);
-            setStatus('Saved to Google Drive', filename);
-          } catch (err) {
-            console.warn('Google Drive save failed:', err);
-            setStatus('Drive save failed — saved locally', filename);
-          }
-        }
-
-        // 3. File System Access API（Desktop Chrome等 — 元ファイル上書き）
+        // 2. File System Access API（Desktop Chrome等 — 元ファイル上書き）
         if (fileHandle) {
           try {
             const writable = await fileHandle.createWritable();
@@ -8292,17 +8568,14 @@
           }
         }
 
-        // 4. IndexedDBに保存（常に実行、完全にサイレント）
+        // 3. IndexedDBに保存（常に実行、完全にサイレント）
         try {
-          const plainBlob = lastPlainBuffer
-            ? new Blob([lastPlainBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
-            : blob;
           await idbSave(filename, plainBlob);
         } catch (idbErr) {
           console.warn('IDB save failed:', idbErr);
         }
 
-        if (!driveFileId && !fileHandle) setStatus('Saved', filename);
+        if (!fileHandle) setStatus('Saved (local)', filename);
 
         hasUnsavedChanges = false;
         photoData.forEach(p => p.isModified = false);
@@ -8338,12 +8611,11 @@
 
         const filename = currentFileName || 'slope_karte.xlsx';
 
-        // 常にIndexedDBに保存（非暗号化、ダウンロードバー不要）
-        try {
-          await idbSave(filename, blob);
-        } catch (idbErr) {
-          console.warn('IDB save failed:', idbErr);
-        }
+        // ★ 保存前検証 + ローリングバックアップ
+        await validateXlsxBlob(blob, 'plain-no-encrypt');
+        await idbSaveBackup(filename, blob);
+
+        // ★ Save (暗号化なし) も GDrive は触らない (Save ボタンと挙動を揃える)
 
         // 1. Capacitorネイティブ保存
         if (isNative && CapFilesystem) {
@@ -8354,18 +8626,7 @@
           }
         }
 
-        // 2. Google Drive上書き保存
-        if (driveFileId) {
-          try {
-            await uploadToDrive(driveFileId, blob);
-            setStatus('Saved to Google Drive (plain)', filename);
-          } catch (err) {
-            console.warn('Google Drive save failed:', err);
-            setStatus('Drive save failed — saved locally', filename);
-          }
-        }
-
-        // 3. File System Access API（Desktop Chrome等 — 元ファイル上書き）
+        // 2. File System Access API（Desktop Chrome等 — 元ファイル上書き）
         if (fileHandle) {
           try {
             const writable = await fileHandle.createWritable();
@@ -8377,7 +8638,14 @@
           }
         }
 
-        if (!driveFileId && !fileHandle) setStatus('Saved (plain)', filename);
+        // 3. IndexedDBに保存
+        try {
+          await idbSave(filename, blob);
+        } catch (idbErr) {
+          console.warn('IDB save failed:', idbErr);
+        }
+
+        if (!fileHandle) setStatus('Saved (plain, local)', filename);
 
         hasUnsavedChanges = false;
         photoData.forEach(p => p.isModified = false);
@@ -8578,16 +8846,23 @@
         }
         // 新しい順にソート
         files.sort((a, b) => (b.savedAt || '').localeCompare(a.savedAt || ''));
+        // 各ファイルのバックアップ数を並行取得
+        const backupCounts = await Promise.all(files.map(f => idbListBackups(f.name).then(l => l.length).catch(() => 0)));
         let html = '<div class="idb-section-title">Saved Files (Local)</div>';
-        files.forEach(f => {
+        files.forEach((f, i) => {
           const sizeMB = (f.size / 1024 / 1024).toFixed(1);
           const date = f.savedAt ? new Date(f.savedAt).toLocaleString('ja-JP', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '';
+          const bk = backupCounts[i] || 0;
+          const restoreBtn = bk > 0
+            ? `<button class="idb-btn-restore" title="以前のバージョンに戻す (${bk}件)" onclick="event.stopPropagation(); showRestoreSheet('${escapeHtml(f.name)}')">↻ ${bk}</button>`
+            : '';
           html += `<div class="idb-file-item" onclick="openFromIdb('${escapeHtml(f.name)}')">
             <div class="idb-file-info">
               <div class="idb-file-name">${escapeHtml(f.name)}</div>
               <div class="idb-file-meta">${sizeMB} MB | ${date}</div>
             </div>
             <div class="idb-file-actions">
+              ${restoreBtn}
               <button class="idb-btn-del" onclick="event.stopPropagation(); deleteFromIdb('${escapeHtml(f.name)}')">Del</button>
             </div>
           </div>`;
@@ -8596,6 +8871,49 @@
       } catch (e) {
         console.warn('IDB list error:', e);
         container.innerHTML = '';
+      }
+    }
+
+    // ============================
+    // バックアップ復元 UI
+    // ============================
+    async function showRestoreSheet(filename) {
+      const backups = await idbListBackups(filename);
+      if (backups.length === 0) {
+        alert('バックアップがありません');
+        return;
+      }
+      const lines = backups.map((b, i) => {
+        const date = b.savedAt ? new Date(b.savedAt).toLocaleString('ja-JP') : '(unknown)';
+        const sizeMB = (b.size / 1024 / 1024).toFixed(2);
+        return `  ${i + 1}. ${date}  (${sizeMB} MB)`;
+      }).join('\n');
+      const ans = prompt(
+        `${filename} のバックアップ ${backups.length} 件\n\n` +
+        lines + '\n\n' +
+        '復元する番号 (1-' + backups.length + ') を入力:',
+        '1'
+      );
+      if (!ans) return;
+      const idx = parseInt(ans, 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= backups.length) {
+        alert('無効な番号です');
+        return;
+      }
+      const chosen = backups[idx];
+      if (!confirm(`${new Date(chosen.savedAt).toLocaleString('ja-JP')} の版を復元します。\n現在のアクティブ版は上書きされます。続行しますか？`)) return;
+      try {
+        showLoading('Restoring backup...');
+        await idbRestoreBackup(filename, chosen.key);
+        hideLoading();
+        setStatus('Backup restored', filename);
+        renderIdbFileList();
+        // 即座に開く
+        openFromIdb(filename);
+      } catch (e) {
+        hideLoading();
+        console.error('Restore failed:', e);
+        alert('復元に失敗しました: ' + e.message);
       }
     }
 
