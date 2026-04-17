@@ -2953,7 +2953,7 @@
 
       // 提案ファイル名: 元ファイル名_YYYYMMDD_HHMMSS.xlsx
       const suggested = timestampedFilename(currentFileName || 'retaining_wall_karte.xlsx');
-      const input = prompt('Drive にアップロードする新しいファイル名 (.xlsx):', suggested);
+      const input = await promptFilename('Drive にアップロードする新しいファイル名 (.xlsx):', suggested);
       if (!input) return;
       const newFilename = /\.xlsx$/i.test(input) ? input : input + '.xlsx';
 
@@ -9306,11 +9306,54 @@
       }
     }
 
+    // ★ 大きい入力欄付きのカスタム prompt (長いファイル名が見切れないため)
+    //   Promise<string|null> を返す。キャンセルなら null。
+    function promptFilename(title, defaultValue) {
+      return new Promise((resolve) => {
+        const backdrop = document.createElement('div');
+        backdrop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px;';
+        const dialog = document.createElement('div');
+        dialog.style.cssText = 'background:#c0c0c0;border:2px solid;border-color:#fff #000 #000 #fff;padding:20px;max-width:720px;width:100%;font-family:inherit;box-shadow:4px 4px 0 rgba(0,0,0,0.3);';
+        dialog.innerHTML = `
+          <div style="font-weight:700;margin-bottom:10px;color:#000;font-size:15px;">${escapeHtml(title)}</div>
+          <input type="text" class="__pf_input" style="width:100%;padding:10px;font-size:14px;border:2px inset #888;background:#fff;color:#000;font-family:monospace;box-sizing:border-box;" autocomplete="off" autocapitalize="off" spellcheck="false">
+          <div style="display:flex;gap:10px;margin-top:16px;justify-content:flex-end;">
+            <button type="button" class="__pf_cancel" style="padding:10px 18px;border:2px solid;border-color:#fff #000 #000 #fff;background:#c0c0c0;color:#000;font-family:inherit;font-size:14px;cursor:pointer;">キャンセル</button>
+            <button type="button" class="__pf_ok" style="padding:10px 18px;border:2px solid;border-color:#fff #000 #000 #fff;background:#c0c0c0;color:#000;font-weight:700;font-family:inherit;font-size:14px;cursor:pointer;">OK</button>
+          </div>
+        `;
+        backdrop.appendChild(dialog);
+        document.body.appendChild(backdrop);
+        const input = dialog.querySelector('.__pf_input');
+        input.value = defaultValue || '';
+        // テキスト全選択状態にして、ユーザーがすぐ書き換えられるようにする
+        // iPad Safari はフォーカス遅延あり
+        requestAnimationFrame(() => {
+          input.focus();
+          input.select();
+        });
+        const done = (result) => {
+          backdrop.remove();
+          resolve(result);
+        };
+        dialog.querySelector('.__pf_ok').addEventListener('click', () => done(input.value));
+        dialog.querySelector('.__pf_cancel').addEventListener('click', () => done(null));
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); done(input.value); }
+          else if (e.key === 'Escape') { e.preventDefault(); done(null); }
+        });
+        // 背景タップでキャンセル
+        backdrop.addEventListener('click', (e) => {
+          if (e.target === backdrop) done(null);
+        });
+      });
+    }
+
     // iPad Safari 等で使えるローカル別名保存
     async function saveFileAsLocalFallback() {
       if (isSaving) return;
       const suggested = timestampedFilename(currentFileName || 'retaining_wall_karte.xlsx');
-      const input = prompt('ローカルに保存する新しいファイル名 (.xlsx):', suggested);
+      const input = await promptFilename('ローカルに保存する新しいファイル名 (.xlsx):', suggested);
       if (!input) return;
       const newFilename = /\.xlsx$/i.test(input) ? input : input + '.xlsx';
 
