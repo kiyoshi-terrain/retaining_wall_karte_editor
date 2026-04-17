@@ -147,3 +147,62 @@
 - iOS / Android / Web 全対応、タッチUI / safe-area 対応
 - プラットフォーム分岐: `isNative` (Capacitor) / `supportsFileSystemAccess` (Web FSA)
 - ダークテーマ（背景 #1a1a2e, カード #2a2a4a, アクセント #667eea）
+
+---
+
+## 実装進捗 (2026-04-17 現在)
+
+### 本番稼働中の機能
+- **GitHub Pages デプロイ**: `https://kiyoshi-terrain.github.io/retaining_wall_karte_editor/` (パブリック、フィールドテスト用)
+- **Service Worker**: オフライン動作可、キャッシュ名 `rw-karte-v16-lens-picker` で都度 bump してキャッシュ更新
+- **PWA**: `manifest.json` + `icon-192/512.png` でホーム画面追加対応
+
+### Phase 1 (Photo(2)) - 完成
+- ✅ Photo(2) 自動選択 (`Photo(N)` 形式優先、Photo123 除外)
+- ✅ パーサー: 126フレーム(21ページ×6枠)、パス文字列 + 埋込画像両対応
+- ✅ Link-lost UI (画像なし + パス文字列あり の枠を黄色表示)
+- ✅ **Delta save**: 原本 zip を JSZip で直接編集、ExcelJS writeBuffer は呼ばない
+- ✅ 画像配置: twoCellAnchor + a:xfrm でアスペクト保持
+- ✅ Retake: `<xdr:pic>` のみ座標マッチで削除、図形(`<xdr:sp>`)は温存
+- ✅ コメント保存 (inline string `(コメント)\n...`)
+- ✅ ファイル名書き込み (画像セルに裸のファイル名)、再ロードで復元
+- ✅ **Excel 図形レンダリング**: drawing3.xml の `<xdr:sp>` / `<xdr:cxnSp>` を抽出し、Canvas で写真に合成表示 (フリーフォーム/rect/ellipse/line 対応)
+
+### 撮影機能
+- ✅ ネイティブカメラ (file input) + 正規化 + EXIF GPS 注入 + IDB raw 保存 + Drive raw アップ
+- ✅ GPS/EXIF/IDB/Drive をバックグラウンド化 (UI ブロック回避)
+- ✅ **オーバーレイカメラ** (`getUserMedia` + 前回写真半透明)
+  - 重ねる/並列 2 モード切替
+  - ズームスライダー (ハードウェアズーム, `applyConstraints({ zoom })`)
+  - 画質プリセット (960 / 1280 / 1920 / 2560 / 3840)
+  - レンズ切替 (メイン / 広角 / 望遠 / 統合、`enumerateDevices()` ベース)
+
+### 保存機能
+- ✅ Save: FSA + Capacitor + IDB に多層保存 (Drive は触らない)
+- ✅ **Drive ↑**: メニューから既存 Drive ファイルを上書き
+- ✅ **Drive ↑ (as...)**: カスタム名で新規アップロード、元ファイル温存
+- ✅ **Drive auto-backup**: トグル ON で通常 Drive 保存時に timestamped コピー追加
+- ✅ **Save As (local)**: iPad Safari でも動作する prompt モーダル + IDB + ブラウザダウンロード
+- ✅ PIN 暗号化 (xlsx-populate AES-256)
+- ✅ Excel 破壊対策 (validateXlsxBlob 構造検証 + IDB 5世代ローリングバックアップ)
+- ✅ Pristine 原本バックアップ (ロード時 IDB 専用枠に永続保存)
+
+### 損傷図 (Phase 3)
+- ✅ ページ分割表示 (5ページ縦連結ではなく Prev/Next ナビゲーション)
+- ✅ Add memo (per-page 手書き、delta save 経由で追加)
+- ✅ **iPad 手書き改善**: パームリジェクション、DPR 対応、予測イベント、筆圧 sqrt カーブ
+
+### Phase 2 (調査票) - 未着手
+- [ ] 変状行のフォームUI (選択(2)シートのプルダウン連携)
+- [ ] 写真番号 ↔ Photo(2) 通番の連携
+
+## 既知の制約・TODO
+- Excel 図形レンダリングの座標系は列幅 304000 EMU / 行高 190500 EMU を固定前提。実ファイルでズレあれば要調整
+- Cloudflare Pages への正式デプロイ (Access 保護) 未着手
+- Capacitor ネイティブビルド (iOS/Android) 未生成 (必要なら `npm run cap:sync` → Xcode/Android Studio)
+- 写真撮影の最大解像度は 4K (3840×2160)。ネイティブカメラと違いセンサー max には届かない
+
+## セッション引き継ぎ時のチェック順序
+1. `git log --oneline | head -20` で直近の変更履歴確認
+2. Service Worker キャッシュ名 (`service-worker.js` の `CACHE_NAME`) を見て現在のバージョン把握
+3. iPad フィールドテストのフィードバックを起点に次タスク決定
