@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v14-split-contain';
+const CACHE_NAME = 'rw-karte-v15-zoom-quality';
 const ASSETS = [
   './',
   './index.html',

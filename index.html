@@ -1805,7 +1805,7 @@
     </div>
 
     <!-- ボトムバー (コントロール) -->
-    <div style="position:absolute;bottom:0;left:0;right:0;padding:20px 16px 30px;background:linear-gradient(to top,rgba(0,0,0,0.75),transparent);display:flex;flex-direction:column;align-items:center;gap:14px;z-index:2;">
+    <div style="position:absolute;bottom:0;left:0;right:0;padding:16px 16px 26px;background:linear-gradient(to top,rgba(0,0,0,0.75),transparent);display:flex;flex-direction:column;align-items:center;gap:10px;z-index:2;">
       <!-- 透明度スライダー: overlay モードでのみ表示 -->
       <div id="overlay-camera-opacity-wrap" style="display:flex;align-items:center;gap:10px;color:#fff;width:100%;max-width:480px;">
         <span style="font-size:11px;min-width:40px;">透明</span>
@@ -1813,12 +1813,24 @@
                style="flex:1;" oninput="updateOverlayOpacity(this.value)">
         <span style="font-size:11px;min-width:40px;text-align:right;">不透明</span>
       </div>
+      <!-- ズームスライダー (ハードウェアズーム対応時のみ表示) -->
+      <div id="overlay-camera-zoom-wrap" style="display:none;align-items:center;gap:10px;color:#fff;width:100%;max-width:480px;">
+        <span style="font-size:11px;min-width:40px;" id="overlay-camera-zoom-min">1×</span>
+        <input type="range" id="overlay-camera-zoom" min="1" max="3" step="0.1" value="1"
+               style="flex:1;" oninput="onOverlayZoomChange(this.value)">
+        <span style="font-size:11px;min-width:40px;text-align:right;" id="overlay-camera-zoom-val">1.0×</span>
+      </div>
       <div style="display:flex;gap:20px;align-items:center;">
         <button onclick="flipOverlayCamera()" style="background:rgba(255,255,255,0.15);color:#fff;border:2px solid #fff;border-radius:50%;width:52px;height:52px;font-size:18px;cursor:pointer;" title="フロント/リア切替">↺</button>
         <button onclick="captureOverlayPhoto()" id="overlay-camera-shutter"
                 style="background:#fff;border:4px solid #fff;border-radius:50%;width:78px;height:78px;cursor:pointer;box-shadow:0 0 0 4px rgba(0,0,0,0.3);"></button>
         <button onclick="toggleOverlayVisible()" id="overlay-camera-toggle-ghost" style="background:rgba(255,255,255,0.15);color:#fff;border:2px solid #fff;border-radius:50%;width:52px;height:52px;font-size:14px;cursor:pointer;" title="前回写真の表示切替">👻</button>
       </div>
+      <!-- 画質プリセット切替 -->
+      <button onclick="cycleOverlayQuality()" id="overlay-camera-quality"
+              style="background:rgba(255,255,255,0.15);color:#fff;border:1px solid #fff;padding:5px 12px;font-size:11px;font-family:inherit;cursor:pointer;">
+        画質: 1280 (HD)
+      </button>
     </div>
   </div>
 
@@ -7688,6 +7700,16 @@
     let overlayStream = null;           // 現在の MediaStream
     let overlayFacingMode = 'environment'; // 'environment' (リア) or 'user' (フロント)
     let overlayDisplayMode = 'overlay';    // 'overlay' (重ねる) or 'split' (並列)
+    // 画質プリセット (long side in px)。localStorage 永続化。
+    const OVERLAY_QUALITY_PRESETS = [
+      { w: 1280, h: 720,  label: '1280 (HD)' },
+      { w: 1920, h: 1080, label: '1920 (Full HD)' },
+      { w: 2560, h: 1440, label: '2560 (QHD)' },
+      { w: 3840, h: 2160, label: '3840 (4K)' },
+      { w: 960,  h: 540,  label: '960 (省容量)' },
+    ];
+    let overlayQualityIdx = parseInt(localStorage.getItem('retainingWallKarteCamQuality') || '0', 10);
+    if (!OVERLAY_QUALITY_PRESETS[overlayQualityIdx]) overlayQualityIdx = 0;
 
     async function openOverlayCamera() {
       const photo = photoData[currentPhotoIndex];
@@ -7715,20 +7737,99 @@
       modal.style.display = 'block';
 
       try {
+        const preset = OVERLAY_QUALITY_PRESETS[overlayQualityIdx];
         overlayStream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: overlayFacingMode,
-            width:  { ideal: 1920 },
-            height: { ideal: 1440 }
+            width:  { ideal: preset.w },
+            height: { ideal: preset.h }
           },
           audio: false
         });
         video.srcObject = overlayStream;
+        // ズーム対応チェック & UI 反映
+        setupOverlayZoomUI();
+        updateOverlayQualityButtonLabel();
       } catch (err) {
         console.error('getUserMedia failed:', err);
         alert('カメラを起動できませんでした: ' + err.message + '\n(権限許可されているかご確認ください)');
         closeOverlayCamera();
       }
+    }
+
+    // ズーム capability の検出と UI セットアップ
+    function setupOverlayZoomUI() {
+      const wrap = document.getElementById('overlay-camera-zoom-wrap');
+      const slider = document.getElementById('overlay-camera-zoom');
+      const minLbl = document.getElementById('overlay-camera-zoom-min');
+      const valLbl = document.getElementById('overlay-camera-zoom-val');
+      if (!overlayStream) { wrap.style.display = 'none'; return; }
+      const [track] = overlayStream.getVideoTracks();
+      if (!track || !track.getCapabilities) { wrap.style.display = 'none'; return; }
+      let caps = {};
+      try { caps = track.getCapabilities(); } catch (_) { caps = {}; }
+      if (!caps.zoom) {
+        wrap.style.display = 'none';
+        return;
+      }
+      const min = caps.zoom.min || 1;
+      const max = caps.zoom.max || 1;
+      const step = caps.zoom.step || 0.1;
+      if (max <= min) { wrap.style.display = 'none'; return; }
+      slider.min = min;
+      slider.max = max;
+      slider.step = step;
+      slider.value = min;
+      minLbl.textContent = `${min.toFixed(1)}×`;
+      valLbl.textContent = `${Number(slider.value).toFixed(1)}× / ${max.toFixed(1)}×`;
+      wrap.style.display = 'flex';
+    }
+
+    async function onOverlayZoomChange(val) {
+      if (!overlayStream) return;
+      const [track] = overlayStream.getVideoTracks();
+      if (!track || !track.applyConstraints) return;
+      const zoom = parseFloat(val);
+      try {
+        await track.applyConstraints({ advanced: [{ zoom }] });
+      } catch (err) {
+        console.warn('zoom apply failed:', err);
+      }
+      const valLbl = document.getElementById('overlay-camera-zoom-val');
+      const slider = document.getElementById('overlay-camera-zoom');
+      valLbl.textContent = `${zoom.toFixed(1)}× / ${Number(slider.max).toFixed(1)}×`;
+    }
+
+    // 画質プリセットをサイクル切替 (カメラ再起動)
+    async function cycleOverlayQuality() {
+      overlayQualityIdx = (overlayQualityIdx + 1) % OVERLAY_QUALITY_PRESETS.length;
+      localStorage.setItem('retainingWallKarteCamQuality', String(overlayQualityIdx));
+      updateOverlayQualityButtonLabel();
+      // カメラ再起動 (新解像度で)
+      if (overlayStream) {
+        overlayStream.getTracks().forEach(t => t.stop());
+        overlayStream = null;
+      }
+      const video = document.getElementById('overlay-camera-video');
+      try {
+        const preset = OVERLAY_QUALITY_PRESETS[overlayQualityIdx];
+        overlayStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: overlayFacingMode, width: { ideal: preset.w }, height: { ideal: preset.h } },
+          audio: false
+        });
+        video.srcObject = overlayStream;
+        setupOverlayZoomUI();
+      } catch (err) {
+        console.warn('quality switch failed:', err);
+        alert('この解像度はサポートされていません: ' + err.message);
+      }
+    }
+
+    function updateOverlayQualityButtonLabel() {
+      const btn = document.getElementById('overlay-camera-quality');
+      if (!btn) return;
+      const preset = OVERLAY_QUALITY_PRESETS[overlayQualityIdx];
+      btn.textContent = `画質: ${preset.label}`;
     }
 
     function closeOverlayCamera() {
@@ -7744,18 +7845,19 @@
 
     async function flipOverlayCamera() {
       overlayFacingMode = overlayFacingMode === 'environment' ? 'user' : 'environment';
-      // 再起動
       if (overlayStream) {
         overlayStream.getTracks().forEach(t => t.stop());
         overlayStream = null;
       }
       const video = document.getElementById('overlay-camera-video');
       try {
+        const preset = OVERLAY_QUALITY_PRESETS[overlayQualityIdx];
         overlayStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: overlayFacingMode, width: { ideal: 1920 }, height: { ideal: 1440 } },
+          video: { facingMode: overlayFacingMode, width: { ideal: preset.w }, height: { ideal: preset.h } },
           audio: false
         });
         video.srcObject = overlayStream;
+        setupOverlayZoomUI();
       } catch (err) {
         console.warn('flip failed:', err);
       }
