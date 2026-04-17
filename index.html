@@ -2062,6 +2062,9 @@
           isStickyNote: annotationObj.isStickyNote || false,
           parentSheet: annotationObj.parentSheet || null,
           originalImages: annotationObj.originalImages || [],
+          // ページ分割モード（損傷図等）の全ページ手書きデータ
+          pageDrawings: annotationObj.pageDrawings || null,
+          currentPage: annotationObj.currentPage ?? null,
           savedAt: new Date().toISOString(),
         });
         await new Promise((resolve, reject) => {
@@ -4758,14 +4761,23 @@
             annotationData[sheetName] = {};
           }
           const ad = annotationData[sheetName];
+          const hasPageDrawings = rec.pageDrawings && Object.keys(rec.pageDrawings).length > 0;
           // 空のエントリなら復元（Excelから読み込めなかったケース）
-          if (!ad.drawingDataUrl && rec.drawingDataUrl) {
+          if (!ad.drawingDataUrl && (rec.drawingDataUrl || hasPageDrawings)) {
             ad.drawingDataUrl = rec.drawingDataUrl;
             ad.compositeDataUrl = rec.compositeDataUrl || null;
             ad.drawObjects = rec.drawObjects || [];
             ad.isStickyNote = rec.isStickyNote || false;
             ad.parentSheet = rec.parentSheet || null;
-            ad.originalImages = rec.originalImages || [];
+            // 既にシートから読み込んだ originalImages は保持し、IDB側は欠落時のみ復元
+            if (!ad.originalImages || ad.originalImages.length === 0) {
+              ad.originalImages = rec.originalImages || [];
+            }
+            // ページ分割モードの手書きデータを復元
+            if (hasPageDrawings) {
+              ad.pageDrawings = rec.pageDrawings;
+              if (rec.currentPage != null) ad.currentPage = rec.currentPage;
+            }
             ad.isModified = true;
             restored++;
           }
@@ -4847,25 +4859,6 @@
     function getFigParentSheet(key) {
       const sep = key.indexOf('::fig');
       return sep >= 0 ? key.substring(0, sep) : key;
-    }
-
-    // 画像群が空間的に分離しているかを判定
-    // （背景＋マーカーのオーバーレイではなく、別々の図が並んでいる場合にtrue）
-    function areImagesSpatiallyGrouped(figImages) {
-      if (figImages.length <= 1) return true; // 1枚以下は「まとまっている」扱い
-      let maxRowSpan = 0;
-      let globalMinRow = Infinity, globalMaxRow = -Infinity;
-      figImages.forEach(img => {
-        const tlRow = img.range.tl.nativeRow ?? img.range.tl.row ?? 0;
-        const brRow = img.range.br?.nativeRow ?? img.range.br?.row ?? (tlRow + 30);
-        const span = brRow - tlRow;
-        if (span > maxRowSpan) maxRowSpan = span;
-        if (tlRow < globalMinRow) globalMinRow = tlRow;
-        if (brRow > globalMaxRow) globalMaxRow = brRow;
-      });
-      const totalSpan = globalMaxRow - globalMinRow;
-      // 全体のrow幅が最大画像の1.8倍を超えたら「分離」と見なす
-      return totalSpan <= maxRowSpan * 1.8;
     }
 
     function renderFigSheet(sheet, sheetName) {
@@ -7889,11 +7882,9 @@
       // 手書き線のみの透過PNGを元画像と同座標に重ねる
       for (const [sheetName, ad] of Object.entries(annotationData)) {
         if (!ad.isModified || !ad.drawingDataUrl) continue;
-        if (ad.showIndividual) continue; // 親エントリはスキップ（個別画像エントリで処理）
+        if (ad.isStickyNote) continue; // 付箋は下のループで処理
 
-        // per-image key (e.g. "損傷図 (2)::fig0") → 実シート名を取得
-        const realSheetName = getFigParentSheet(sheetName);
-        const figSheet = workbook.getWorksheet(realSheetName);
+        const figSheet = workbook.getWorksheet(sheetName);
         if (!figSheet) continue;
 
         const match = ad.drawingDataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
