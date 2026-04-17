@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v15-zoom-quality';
+const CACHE_NAME = 'rw-karte-v16-lens-picker';
 const ASSETS = [
   './',
   './index.html',

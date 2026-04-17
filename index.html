@@ -1826,11 +1826,18 @@
                 style="background:#fff;border:4px solid #fff;border-radius:50%;width:78px;height:78px;cursor:pointer;box-shadow:0 0 0 4px rgba(0,0,0,0.3);"></button>
         <button onclick="toggleOverlayVisible()" id="overlay-camera-toggle-ghost" style="background:rgba(255,255,255,0.15);color:#fff;border:2px solid #fff;border-radius:50%;width:52px;height:52px;font-size:14px;cursor:pointer;" title="前回写真の表示切替">👻</button>
       </div>
-      <!-- 画質プリセット切替 -->
-      <button onclick="cycleOverlayQuality()" id="overlay-camera-quality"
-              style="background:rgba(255,255,255,0.15);color:#fff;border:1px solid #fff;padding:5px 12px;font-size:11px;font-family:inherit;cursor:pointer;">
-        画質: 1280 (HD)
-      </button>
+      <!-- 画質プリセット + カメラ選択 -->
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center;">
+        <button onclick="cycleOverlayQuality()" id="overlay-camera-quality"
+                style="background:rgba(255,255,255,0.15);color:#fff;border:1px solid #fff;padding:5px 12px;font-size:11px;font-family:inherit;cursor:pointer;">
+          画質: 1280 (HD)
+        </button>
+        <button onclick="cycleOverlayLens()" id="overlay-camera-lens"
+                style="display:none;background:rgba(255,255,255,0.15);color:#fff;border:1px solid #fff;padding:5px 12px;font-size:11px;font-family:inherit;cursor:pointer;"
+                title="レンズ切替 (メイン / 広角 / 望遠)">
+          レンズ: -
+        </button>
+      </div>
     </div>
   </div>
 
@@ -7710,6 +7717,9 @@
     ];
     let overlayQualityIdx = parseInt(localStorage.getItem('retainingWallKarteCamQuality') || '0', 10);
     if (!OVERLAY_QUALITY_PRESETS[overlayQualityIdx]) overlayQualityIdx = 0;
+    // 利用可能なレンズ (リアカメラ複数の場合: Back Camera / Back Ultra Wide / Back Telephoto 等)
+    let overlayLensList = [];       // [{ deviceId, label, hint: 'wide'|'main'|'tele' }, ...]
+    let overlayLensIdx = 0;
 
     async function openOverlayCamera() {
       const photo = photoData[currentPhotoIndex];
@@ -7747,6 +7757,8 @@
           audio: false
         });
         video.srcObject = overlayStream;
+        // デバイス列挙 (初回の getUserMedia 許可後に label が取得可能になる)
+        await enumerateOverlayLenses();
         // ズーム対応チェック & UI 反映
         setupOverlayZoomUI();
         updateOverlayQualityButtonLabel();
@@ -7754,6 +7766,87 @@
         console.error('getUserMedia failed:', err);
         alert('カメラを起動できませんでした: ' + err.message + '\n(権限許可されているかご確認ください)');
         closeOverlayCamera();
+      }
+    }
+
+    // 利用可能なビデオデバイスを列挙し、リア側に複数あれば切替可能にする
+    async function enumerateOverlayLenses() {
+      const btn = document.getElementById('overlay-camera-lens');
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videos = devices.filter(d => d.kind === 'videoinput');
+
+        // facingMode 判定: label から推測
+        //   iOS: "Back Camera", "Back Ultra Wide Camera", "Back Triple Camera", "Back Telephoto Camera" 等
+        //   Android: "camera2 0, facing back" 等
+        const isRear = (label) => /back|rear|環境|リア/i.test(label) || !/front|user|フロント/i.test(label);
+        const lensHint = (label) => {
+          if (/ultra\s*wide|超広角|ultrawide/i.test(label)) return '広角';
+          if (/telephoto|望遠/i.test(label)) return '望遠';
+          if (/triple|dual|統合/i.test(label)) return '統合';
+          return 'メイン';
+        };
+
+        // 現在の facing のみ対象
+        const matchFacing = (d) => overlayFacingMode === 'environment' ? isRear(d.label) : /front|user|フロント/i.test(d.label);
+        let list = videos.filter(matchFacing).map(d => ({
+          deviceId: d.deviceId,
+          label: d.label || '(unlabeled)',
+          hint: lensHint(d.label || '')
+        }));
+
+        // フォールバック: facing で絞れなかった場合は全リアをまとめて (permission 未確定で label 空の時用)
+        if (list.length === 0) {
+          list = videos.map(d => ({ deviceId: d.deviceId, label: d.label || '(unlabeled)', hint: 'メイン' }));
+        }
+
+        overlayLensList = list;
+        // 現在のトラックの deviceId で idx を推定
+        const [track] = overlayStream ? overlayStream.getVideoTracks() : [];
+        const curSettings = track && track.getSettings ? track.getSettings() : {};
+        const curIdx = list.findIndex(l => l.deviceId === curSettings.deviceId);
+        overlayLensIdx = curIdx >= 0 ? curIdx : 0;
+
+        // 2つ以上あればボタン表示
+        if (list.length >= 2) {
+          btn.style.display = 'inline-block';
+          btn.textContent = `レンズ: ${list[overlayLensIdx]?.hint || 'メイン'} (${overlayLensIdx + 1}/${list.length})`;
+        } else {
+          btn.style.display = 'none';
+        }
+      } catch (err) {
+        console.warn('enumerateDevices failed:', err);
+        btn.style.display = 'none';
+      }
+    }
+
+    // レンズサイクル切替 (メイン → 広角 → 望遠 → メイン)
+    async function cycleOverlayLens() {
+      if (overlayLensList.length < 2) return;
+      overlayLensIdx = (overlayLensIdx + 1) % overlayLensList.length;
+      const target = overlayLensList[overlayLensIdx];
+      if (overlayStream) {
+        overlayStream.getTracks().forEach(t => t.stop());
+        overlayStream = null;
+      }
+      const video = document.getElementById('overlay-camera-video');
+      const preset = OVERLAY_QUALITY_PRESETS[overlayQualityIdx];
+      try {
+        overlayStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            deviceId: { exact: target.deviceId },
+            width:  { ideal: preset.w },
+            height: { ideal: preset.h }
+          },
+          audio: false
+        });
+        video.srcObject = overlayStream;
+        setupOverlayZoomUI();
+        const btn = document.getElementById('overlay-camera-lens');
+        btn.textContent = `レンズ: ${target.hint} (${overlayLensIdx + 1}/${overlayLensList.length})`;
+      } catch (err) {
+        console.warn('lens switch failed:', err);
+        alert('レンズ切替に失敗: ' + err.message);
       }
     }
 
@@ -7857,6 +7950,7 @@
           audio: false
         });
         video.srcObject = overlayStream;
+        await enumerateOverlayLenses();
         setupOverlayZoomUI();
       } catch (err) {
         console.warn('flip failed:', err);
