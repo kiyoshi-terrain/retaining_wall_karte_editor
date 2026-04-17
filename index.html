@@ -4287,19 +4287,6 @@
         //   save 時は ExcelJS writeBuffer ではなくこのバッファに delta を適用する。
         originalZipBuffer = loadBuffer.slice(0);
 
-        // ★ Gap A: Pristine backup — ロードした原本を IDB の専用枠に永続保存。
-        //   通常のローリングバックアップとは別管理で、ユーザーが明示的に削除しない限り
-        //   最古の原本状態に戻せる「最後の砦」。
-        try {
-          const pristineBlob = new Blob([loadBuffer], {
-            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-          });
-          const pristineFilename = file.name || currentFileName || 'unknown.xlsx';
-          await idbSavePristineBackup(pristineFilename, pristineBlob);
-        } catch (pristineErr) {
-          console.warn('pristine backup failed:', pristineErr);
-        }
-
         // 元のarrayBufferはもう不要 — GC対象にしてメモリ解放
         arrayBuffer = null;
 
@@ -7729,92 +7716,10 @@
 
 
     // 本体: 擁壁フォーマット用の delta 保存
-    // ★ Gap B: delta 保存の不変条件チェック用ヘルパー。
-    //   入力 zip と 出力 zip の「構造的指標」を比較して、データ減少がないことを保証。
-    //   各シートXMLのセル数・drawingの twoCellAnchor 数・media ファイル数が減っていたら
-    //   abort。regex バグなどで意図せず anchor が削除されるケースを検出する。
-    async function computeStructuralFingerprint(zip) {
-      const fp = { sheets: {}, drawings: {}, mediaCount: 0, sharedStrings: 0 };
-      for (const [path, file] of Object.entries(zip.files)) {
-        if (/^xl\/worksheets\/sheet\d+\.xml$/.test(path)) {
-          const xml = await file.async('string');
-          fp.sheets[path] = {
-            cellCount: (xml.match(/<c\s/g) || []).length,
-            rowCount: (xml.match(/<row\s/g) || []).length,
-            mergedCount: (xml.match(/<mergeCell\b/g) || []).length,
-          };
-        } else if (/^xl\/drawings\/drawing\d+\.xml$/.test(path)) {
-          const xml = await file.async('string');
-          fp.drawings[path] = {
-            twoCellAnchorCount: (xml.match(/<xdr:twoCellAnchor\b/g) || []).length,
-            oneCellAnchorCount: (xml.match(/<xdr:oneCellAnchor\b/g) || []).length,
-          };
-        } else if (/^xl\/media\//.test(path)) {
-          fp.mediaCount++;
-        } else if (path === 'xl/sharedStrings.xml') {
-          const xml = await file.async('string');
-          fp.sharedStrings = (xml.match(/<si\b/g) || []).length;
-        }
-      }
-      return fp;
-    }
-
-    function assertDeltaInvariants(before, after, tag) {
-      const errs = [];
-      // Media ファイル数: 減ってはならない (追加のみ)
-      if (after.mediaCount < before.mediaCount) {
-        errs.push(`mediaCount regressed: ${before.mediaCount} → ${after.mediaCount}`);
-      }
-      // sharedStrings: 減ってもよい (inline string 化で unused になることあり) が、
-      // 半分以下に激減するのは異常
-      if (after.sharedStrings < before.sharedStrings * 0.5 && before.sharedStrings > 10) {
-        errs.push(`sharedStrings drastically shrunk: ${before.sharedStrings} → ${after.sharedStrings}`);
-      }
-      // 各シート: セル数は大きく減ってはならない。編集で多少減ることは許容 (path 文字列クリア等で -10 程度)
-      for (const [path, bf] of Object.entries(before.sheets)) {
-        const af = after.sheets[path];
-        if (!af) {
-          errs.push(`sheet ${path} disappeared`);
-          continue;
-        }
-        // セル数が 100 以上減っていたら異常 (明示的な削除操作はないので)
-        if (bf.cellCount - af.cellCount > 100) {
-          errs.push(`${path} cellCount dropped too much: ${bf.cellCount} → ${af.cellCount}`);
-        }
-        // merged セルは減らしてはならない (テンプレ罫線の破壊検出)
-        if (af.mergedCount < bf.mergedCount) {
-          errs.push(`${path} mergedCount regressed: ${bf.mergedCount} → ${af.mergedCount}`);
-        }
-      }
-      // 各 drawing: 既存アンカー名="Annotation_*" は再生成で減ることがあるが、
-      // それ以外 (テンプレ画像) は減ってはならない。合計は以前より減らないことを確認。
-      for (const [path, bf] of Object.entries(before.drawings)) {
-        const af = after.drawings[path];
-        if (!af) {
-          errs.push(`drawing ${path} disappeared`);
-          continue;
-        }
-        // 二段防御: テンプレ画像の twoCellAnchor を ±2 以上減らしたら異常 (regex 事故検出)
-        if (bf.twoCellAnchorCount - af.twoCellAnchorCount > 2) {
-          errs.push(`${path} twoCellAnchor regressed: ${bf.twoCellAnchorCount} → ${af.twoCellAnchorCount} (regex bug?)`);
-        }
-      }
-      if (errs.length > 0) {
-        const msg = `[${tag}] delta invariant violation:\n  - ` + errs.join('\n  - ');
-        console.error(msg);
-        throw new Error(msg);
-      }
-      console.log(`[${tag}] invariant OK: sheets=${Object.keys(after.sheets).length}, drawings=${Object.keys(after.drawings).length}, media=${after.mediaCount}`);
-    }
-
     async function buildSaveBlobRetainingWall() {
       if (!originalZipBuffer) {
         throw new Error('原本ZIPバッファ未退避: ファイルを開き直してください');
       }
-      // ★ 不変条件チェック用に、入力の構造スナップショットを先に取る
-      const inputFingerprint = await computeStructuralFingerprint(
-        await JSZip.loadAsync(originalZipBuffer)
-      );
       const zip = await JSZip.loadAsync(originalZipBuffer);
       const { sheetPath, drawingPath } = await resolvePhotoSheetPaths(zip);
       console.log(`[delta-save] Photo(2) sheet=${sheetPath}, drawing=${drawingPath}`);
@@ -8068,14 +7973,6 @@
           compression: 'DEFLATE',
           compressionOptions: { level: 6 }
         });
-
-        // ★ Gap B: 不変条件チェック — 出力 zip を再ロードして指標を比較
-        //   入力より減ってはいけないもの (mediaCount, テンプレ画像 anchor, mergedCell 等) を検出
-        const outputFingerprint = await computeStructuralFingerprint(
-          await JSZip.loadAsync(buffer)
-        );
-        assertDeltaInvariants(inputFingerprint, outputFingerprint, 'delta-save');
-
         // 次回のdelta saveが今回の変更を含むように原本バッファを更新
         originalZipBuffer = buffer.slice(0);
       } else {
@@ -8093,28 +7990,6 @@
       if (appPIN) {
         const xlsxWb = await XlsxPopulate.fromDataAsync(buffer.slice(0));
         const encrypted = await xlsxWb.outputAsync({ password: appPIN, type: 'arraybuffer' });
-
-        // ★ Gap D: 暗号化 round-trip 検証
-        //   xlsx-populate 暗号化→復号→structural validate で、
-        //   暗号化パイプラインが意図せず内容を破壊していないかを確認。
-        try {
-          if (!encrypted || encrypted.byteLength < 4096) {
-            throw new Error(`encrypted buffer suspiciously small: ${encrypted?.byteLength ?? 0}`);
-          }
-          const verifyWb = await XlsxPopulate.fromDataAsync(encrypted.slice(0), {
-            password: appPIN
-          });
-          const decryptedBuf = await verifyWb.outputAsync({ type: 'arraybuffer' });
-          const decryptedBlob = new Blob([decryptedBuf], {
-            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-          });
-          await validateXlsxBlob(decryptedBlob, 'encrypt-roundtrip');
-          console.log('[encrypt-roundtrip] OK (decrypt verified)');
-        } catch (rtErr) {
-          console.error('[encrypt-roundtrip] failed:', rtErr);
-          throw new Error('暗号化検証失敗: ' + rtErr.message + ' — 保存を中止しました');
-        }
-
         return new Blob([encrypted], {
           type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         });
@@ -8547,47 +8422,8 @@
     function backupKeyFor(filename, ts) {
       return `${filename}::${ts}`;
     }
-    function pristineBackupKeyFor(filename) {
-      return `${filename}::__pristine__`;
-    }
-
-    // ★ Pristine backup: ロード時点の原本 blob を IDB に保存。
-    //   通常のローリングバックアップとは別管理で、prune されない (kind='pristine')。
-    //   既に pristine がある場合は上書きしない (最古の原本を保持)。
-    async function idbSavePristineBackup(filename, blob) {
-      try {
-        const db = await openIDB();
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction(IDB_BACKUP_STORE, 'readwrite');
-          const store = tx.objectStore(IDB_BACKUP_STORE);
-          const key = pristineBackupKeyFor(filename);
-          const getReq = store.get(key);
-          getReq.onsuccess = () => {
-            if (getReq.result) {
-              console.log(`[idbSavePristineBackup] ${filename} pristine already exists (size=${getReq.result.size}) - skipping`);
-              return; // 既存の pristine は上書きしない
-            }
-            store.put({
-              key,
-              filename,
-              blob,
-              savedAt: new Date().toISOString(),
-              size: blob.size,
-              kind: 'pristine'
-            });
-            console.log(`[idbSavePristineBackup] ${filename} pristine saved (size=${blob.size})`);
-          };
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error);
-        });
-        db.close();
-      } catch (err) {
-        console.warn('idbSavePristineBackup failed:', err);
-      }
-    }
 
     // put + prune を 1 トランザクションで。失敗しても save パイプラインは止めない。
-    //   pristine backup (kind='pristine') は prune 対象外。
     async function idbSaveBackup(filename, blob) {
       try {
         const db = await openIDB();
@@ -8602,19 +8438,15 @@
             filename,
             blob,
             savedAt: new Date(now).toISOString(),
-            size: blob.size,
-            kind: 'rolling'
+            size: blob.size
           });
           // 該当 filename の既存バックアップ列挙 → 新しい順に並べて MAX を超えた分を delete
-          //   pristine (kind='pristine') は除外
           const collected = [];
           const req = index.openCursor(IDBKeyRange.only(filename));
           req.onsuccess = (e) => {
             const cursor = e.target.result;
             if (cursor) {
-              if (cursor.value.kind !== 'pristine') {
-                collected.push({ key: cursor.value.key, savedAt: cursor.value.savedAt });
-              }
+              collected.push({ key: cursor.value.key, savedAt: cursor.value.savedAt });
               cursor.continue();
             } else {
               // 新規を含めて最新順ソート (new entry は既に put 済み = 含まれる)
@@ -8648,13 +8480,8 @@
           req.onsuccess = () => {
             db.close();
             const list = (req.result || [])
-              .map(r => ({ key: r.key, savedAt: r.savedAt, size: r.size, kind: r.kind || 'rolling' }))
-              // pristine は先頭に固定。その他は新しい順
-              .sort((a, b) => {
-                if (a.kind === 'pristine' && b.kind !== 'pristine') return -1;
-                if (b.kind === 'pristine' && a.kind !== 'pristine') return 1;
-                return (b.savedAt || '').localeCompare(a.savedAt || '');
-              });
+              .map(r => ({ key: r.key, savedAt: r.savedAt, size: r.size }))
+              .sort((a, b) => (b.savedAt || '').localeCompare(a.savedAt || ''));
             resolve(list);
           };
           req.onerror = () => { db.close(); reject(req.error); };
@@ -8723,27 +8550,7 @@
         if (isNative && CapFilesystem) {
           try {
             await capSaveFile(filename, blob);
-            // ★ Gap C: 書き込み後の read-back 検証
-            //   ディスクに書いたバイトが本当に blob と一致するか確認。
-            //   復号後の構造を validateXlsxBlob で再検査。
-            try {
-              const readBack = await capReadFile(filename);
-              const readBackBlob = new Blob([readBack], {
-                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-              });
-              // PIN 暗号化済みなら blob は CDF 形式 → ZIP 検証は skip し、サイズのみ確認
-              if (appPIN) {
-                if (readBack.byteLength < 4096) {
-                  throw new Error(`read-back too small: ${readBack.byteLength}`);
-                }
-              } else {
-                await validateXlsxBlob(readBackBlob, 'cap-readback');
-              }
-              setStatus('Saved', filename);
-            } catch (rbErr) {
-              console.error('[capSaveFile] read-back validation failed:', rbErr);
-              alert('Capacitor 保存後の検証に失敗しました。IDB バックアップから復元できます:\n' + rbErr.message);
-            }
+            setStatus('Saved', filename);
           } catch (err) {
             console.warn('Capacitor save failed:', err);
           }
@@ -8755,21 +8562,7 @@
             const writable = await fileHandle.createWritable();
             await writable.write(blob);
             await writable.close();
-            // ★ Gap C: FSA でも書き込み後の read-back 検証
-            try {
-              const readBackFile = await fileHandle.getFile();
-              if (appPIN) {
-                if (readBackFile.size < 4096) {
-                  throw new Error(`read-back too small: ${readBackFile.size}`);
-                }
-              } else {
-                await validateXlsxBlob(readBackFile, 'fsa-readback');
-              }
-              setStatus('Overwritten', filename);
-            } catch (rbErr) {
-              console.error('[FSA] read-back validation failed:', rbErr);
-              alert('ファイル上書き後の検証に失敗しました。IDB バックアップから復元できます:\n' + rbErr.message);
-            }
+            setStatus('Overwritten', filename);
           } catch (err) {
             console.warn('FSA overwrite failed:', err);
           }
@@ -9093,8 +8886,7 @@
       const lines = backups.map((b, i) => {
         const date = b.savedAt ? new Date(b.savedAt).toLocaleString('ja-JP') : '(unknown)';
         const sizeMB = (b.size / 1024 / 1024).toFixed(2);
-        const kindLabel = b.kind === 'pristine' ? ' ★ ORIGINAL (ロード時原本)' : '';
-        return `  ${i + 1}. ${date}  (${sizeMB} MB)${kindLabel}`;
+        return `  ${i + 1}. ${date}  (${sizeMB} MB)`;
       }).join('\n');
       const ans = prompt(
         `${filename} のバックアップ ${backups.length} 件\n\n` +
