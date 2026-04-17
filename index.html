@@ -2702,6 +2702,12 @@
       await ensureGdriveToken();
       const contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
+      // ★ 安全装置: 空/極小 blob で GDrive 上書きして元ファイルを潰す事故を防ぐ。
+      //   Excel は最小でも数十 KB (空テンプレでも ~10KB)。
+      if (!blob || blob.size < 4096) {
+        throw new Error(`Refusing to upload suspiciously small blob (${blob?.size ?? 0} bytes) — likely detached buffer bug. File NOT overwritten.`);
+      }
+
       if (blob.size <= 5 * 1024 * 1024) {
         // Simple upload (≤5MB)
         const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&supportsAllDrives=true`, {
@@ -7803,7 +7809,20 @@
           ? await zip.files[figDrawRelsPath].async('string') : null;
 
         // 前回の手書きアンカーを削除 (name="Annotation_*" で識別)
-        figDrawXml = figDrawXml.replace(/<xdr:twoCellAnchor>[^]*?name="Annotation_[^"]*"[^]*?<\/xdr:twoCellAnchor>/g, '');
+        //
+        // ★ 重要 (2026-04): 以前の `<xdr:twoCellAnchor>[^]*?name="Annotation_..."[^]*?</xdr:twoCellAnchor>`
+        //   は lazy match でも複数アンカーをまたいでマッチする致命的バグがあった。
+        //   ページ背景アンカーより後に Annotation_ アンカーが一つでもあると、
+        //   最初の `<xdr:twoCellAnchor>` (背景page1) から Annotation_ の閉じタグまで
+        //   全部 1 マッチとして削除され、背景画像が全て消えて Excel が壊れていた。
+        //   → 1 アンカー単位で lazy match → コールバックで Annotation_ 判定 → 安全に削除。
+        const annBefore = (figDrawXml.match(/name="Annotation_[^"]*"/g) || []).length;
+        figDrawXml = figDrawXml.replace(
+          /<xdr:twoCellAnchor\b[^>]*>[\s\S]*?<\/xdr:twoCellAnchor>/g,
+          (match) => /name="Annotation_[^"]*"/.test(match) ? '' : match
+        );
+        const annAfter = (figDrawXml.match(/name="Annotation_[^"]*"/g) || []).length;
+        console.log(`[delta-save] ${sheetName} Annotation_ アンカー除去: ${annBefore} → ${annAfter}`);
 
         for (const { pageIdx, drawingDataUrl } of pagesToSave) {
           const match = drawingDataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
@@ -7891,12 +7910,15 @@
         buffer = originalZipBuffer.slice(0);
       }
 
-      // IDB 用プレーンバッファ保持
-      lastPlainBuffer = buffer;
+      // IDB/GDrive 用プレーンバッファ保持
+      // ★ xlsx-populate は内部で ArrayBuffer を transfer する場合があり、
+      //   lastPlainBuffer が共有参照だと暗号化後に detached になって GDrive に 0 バイト
+      //   アップロード → ファイル破損。必ずコピーを保持する。
+      lastPlainBuffer = buffer.slice(0);
 
-      // PIN があれば xlsx-populate で暗号化
+      // PIN があれば xlsx-populate で暗号化 (xlsx-populate に渡すのも独立コピー)
       if (appPIN) {
-        const xlsxWb = await XlsxPopulate.fromDataAsync(buffer);
+        const xlsxWb = await XlsxPopulate.fromDataAsync(buffer.slice(0));
         const encrypted = await xlsxWb.outputAsync({ password: appPIN, type: 'arraybuffer' });
         return new Blob([encrypted], {
           type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -8201,14 +8223,16 @@
       // ZIP整合性検証・修復（ExcelJSが壊したContent_Typesやdrawing参照を修正）
       buffer = await verifyAndFixZipIntegrity(buffer);
 
-      // IDB保存用に非暗号化バッファを保持
-      lastPlainBuffer = buffer;
+      // IDB/GDrive 用非暗号化バッファを保持
+      // ★ xlsx-populate は内部で ArrayBuffer を transfer する場合があり、
+      //   共有参照のままだと lastPlainBuffer が detached になって GDrive に 0 バイト
+      //   アップロードされる → ファイル破損。必ずコピーを保持する。
+      lastPlainBuffer = buffer.slice(0);
 
-      // PINが設定されていれば暗号化して保存
+      // PINが設定されていれば暗号化して保存 (独立コピーを渡す)
       if (appPIN) {
         showLoading('Encrypting...');
-        // xlsx-populateで暗号化
-        const encryptedBuffer = await encryptBuffer(buffer);
+        const encryptedBuffer = await encryptBuffer(buffer.slice(0));
         return new Blob([encryptedBuffer], {
           type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         });
