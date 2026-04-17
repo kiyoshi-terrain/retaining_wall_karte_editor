@@ -4773,7 +4773,9 @@
             const imageRow   = pageBase + offset.imageOffset;
             const commentRow = pageBase + offset.commentOffset;
 
-            // 画像セル (パス文字列が入っている可能性あり)
+            // 画像セル (パス文字列 or 裸のファイル名 が入っている可能性あり)
+            //   "Z:\...\xxx.jpg"  → link-lost 判定用 pathString (引用符付きのみ)
+            //   xxx.jpg            → 当アプリが以前の save で書き込んだファイル名
             const imgCellValue = getCellText(sheet.getCell(imageRow, imageCol)).trim();
             const pathString = /^".+\.(jpg|jpeg|png|bmp|gif)"?\s*$/i.test(imgCellValue) ? imgCellValue : '';
 
@@ -4792,10 +4794,12 @@
             // ラベルは通し番号 (1..N)。BL列はページ内ローカル行番号(リセット)のため利用しない
             const label = String(frameIndex + 1);
 
-            // パス文字列からファイル名抽出 (将来、Drive Photos/ から同名ファイルを探す手がかりに)
+            // ファイル名抽出: pathString 形式 (引用符付き Z:\...\xxx.jpg) か、
+            //                  アプリが以前の save で書き込んだ裸のファイル名
+            //                  どちらからも拾えるようにする
             let filename = '';
-            if (pathString) {
-              const m = pathString.match(/([^\\\/"']+\.\w{3,4})/i);
+            if (imgCellValue) {
+              const m = imgCellValue.match(/([^\\\/"'\s]+\.\w{3,4})(?=["\s]|$)/i);
               if (m) filename = m[1];
             }
 
