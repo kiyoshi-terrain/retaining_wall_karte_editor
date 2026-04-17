@@ -7796,6 +7796,38 @@
             console.log(`[delta-save] 画像寸法 (既設定): ${photo.label} = ${photo.imageWidth}x${photo.imageHeight}`);
           }
 
+          // 0. retake: この枠位置の既存 anchor を先に除去 (重複防止)
+          //   同じ labelRow/labelCol に以前の画像の anchor があれば削除。
+          //   1 anchor 単位で lazy match → 位置判定で選別削除 (annotation removal と同じ方式)
+          if (drawingXml) {
+            const targetCol = photo.labelCol - 1;  // 0-indexed
+            const targetRow = photo.labelRow - 1;
+            let removedCount = 0;
+            const removeAnchorAt = (xml, tagName) => {
+              const re = new RegExp(`<xdr:${tagName}\\b[^>]*>[\\s\\S]*?</xdr:${tagName}>`, 'g');
+              return xml.replace(re, (match) => {
+                const fc = match.match(/<xdr:from>\s*<xdr:col>(\d+)/);
+                const fr = match.match(/<xdr:from>[\s\S]*?<xdr:row>(\d+)/);
+                if (!fc || !fr) return match;
+                const c = parseInt(fc[1]);
+                const r = parseInt(fr[1]);
+                // tolerance ±2 で近傍マッチ (テンプレの画像 anchor を検出)
+                //   ただし Annotation_* (手書きメモ) は削除対象外 (別管理)
+                if (/name="Annotation_[^"]*"/.test(match)) return match;
+                if (Math.abs(c - targetCol) <= 2 && Math.abs(r - targetRow) <= 2) {
+                  removedCount++;
+                  return '';
+                }
+                return match;
+              });
+            };
+            drawingXml = removeAnchorAt(drawingXml, 'twoCellAnchor');
+            drawingXml = removeAnchorAt(drawingXml, 'oneCellAnchor');
+            if (removedCount > 0) {
+              console.log(`[delta-save] retake: 既存 anchor ${removedCount}枚を除去 (${photo.label} col=${targetCol} row=${targetRow})`);
+            }
+          }
+
           // 1. media 追加
           const mediaName = nextMediaName(zip, ext);
           zip.file(`xl/media/${mediaName}`, bytes);
