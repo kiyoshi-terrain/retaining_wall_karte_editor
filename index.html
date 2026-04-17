@@ -4876,7 +4876,7 @@
       showLoading('Loading drawing...');
 
       const images = sheet.getImages();
-      const figImages = [];
+      const allImages = [];
 
       images.forEach(img => {
         const image = workbook.getImage(img.imageId);
@@ -4887,7 +4887,7 @@
           );
           const ext = image.extension || 'png';
           const dataUrl = `data:image/${ext};base64,${base64}`;
-          figImages.push({
+          allImages.push({
             dataUrl: dataUrl,
             imageId: img.imageId,
             range: img.range,
@@ -4895,6 +4895,33 @@
           });
         }
       });
+
+      // 画像をrange単位でグループ化:
+      //   同じrangeを共有する複数画像 = 1枚目が背景ページ、2枚目以降は過去保存のオーバーレイ
+      //   オーバーレイは pageDrawings 初期値として取り込み、pagesからは除外
+      function rangeKey(range) {
+        if (!range || !range.tl) return '';
+        const tlR = range.tl.nativeRow ?? range.tl.row ?? 0;
+        const tlC = range.tl.nativeCol ?? range.tl.col ?? 0;
+        const brR = range.br?.nativeRow ?? range.br?.row ?? tlR;
+        const brC = range.br?.nativeCol ?? range.br?.col ?? tlC;
+        return `${Math.round(tlR*10)},${Math.round(tlC*10)}-${Math.round(brR*10)},${Math.round(brC*10)}`;
+      }
+      const rangeGroups = new Map();
+      for (const img of allImages) {
+        const k = rangeKey(img.range);
+        if (!rangeGroups.has(k)) rangeGroups.set(k, []);
+        rangeGroups.get(k).push(img);
+      }
+      const figImages = [];            // 背景ページ (各rangeの1枚目)
+      const overlayByRange = new Map(); // range → 最後に保存されたオーバーレイdataUrl
+      for (const [k, group] of rangeGroups.entries()) {
+        figImages.push(group[0]);
+        if (group.length > 1) {
+          overlayByRange.set(k, group[group.length - 1].dataUrl);
+        }
+      }
+      // allImages の入力順をなるべく保つため再ソート不要 (Map はinsertion-order)
 
       // IDB復元で空エントリが先に作られている場合でも、必ずExcelから画像を再解析する。
       // 既存の手書きデータ (drawingDataUrl, pageDrawings 等) は保持しつつ、
@@ -4916,17 +4943,25 @@
               const rb = b.range?.tl?.nativeRow ?? b.range?.tl?.row ?? 0;
               return ra - rb;
             });
+            // Excel に保存済みのオーバーレイ (range重複画像) を pageDrawings に取り込む
+            // IDB にローカルバックアップがある場合はそちらを優先
+            const mergedPageDrawings = Object.assign({}, prevAd.pageDrawings || {});
+            sortedPages.forEach((pg, i) => {
+              if (mergedPageDrawings[i]) return; // IDB側に既にあるので上書きしない
+              const overlayUrl = overlayByRange.get(rangeKey(pg.range));
+              if (overlayUrl) mergedPageDrawings[i] = overlayUrl;
+            });
             const cp = prevAd.currentPage || 0;
             annotationData[sheetName] = {
               backgroundDataUrl: sortedPages[cp]?.dataUrl || sortedPages[0].dataUrl,
-              drawingDataUrl:    prevAd.pageDrawings?.[cp]    || prevAd.drawingDataUrl    || null,
-              drawObjects:       prevAd.pageDrawObjects?.[cp] || prevAd.drawObjects       || [],
-              compositeDataUrl:  prevAd.pageComposites?.[cp]  || prevAd.compositeDataUrl  || null,
+              drawingDataUrl:    mergedPageDrawings[cp]           || prevAd.drawingDataUrl    || null,
+              drawObjects:       prevAd.pageDrawObjects?.[cp]     || prevAd.drawObjects       || [],
+              compositeDataUrl:  prevAd.pageComposites?.[cp]      || prevAd.compositeDataUrl  || null,
               isModified:        prevAd.isModified || false,
               originalImages: figImages,
               pages: sortedPages,
               currentPage: cp,
-              pageDrawings:    prevAd.pageDrawings    || {},
+              pageDrawings:    mergedPageDrawings,
               pageDrawObjects: prevAd.pageDrawObjects || {},
               pageComposites:  prevAd.pageComposites  || {},
             };
@@ -7919,39 +7954,86 @@
 
       // 手書きメモ（図面アノテーション）をExcelに書き込む
       // 手書き線のみの透過PNGを元画像と同座標に重ねる
+      //
+      // レイヤリング方針:
+      //   - ページ毎に独立したオーバーレイを、そのページの元画像と同座標に配置
+      //   - 既存のオーバーレイ (=元画像と重なる位置にある後続image) は削除してから再追加
+      //     (毎回保存の度に重ね足されて画像が増殖するのを防ぐ)
+      function rangeKey(range) {
+        if (!range || !range.tl) return '';
+        const tlR = range.tl.nativeRow ?? range.tl.row ?? 0;
+        const tlC = range.tl.nativeCol ?? range.tl.col ?? 0;
+        const brR = range.br?.nativeRow ?? range.br?.row ?? tlR;
+        const brC = range.br?.nativeCol ?? range.br?.col ?? tlC;
+        return `${Math.round(tlR*10)},${Math.round(tlC*10)}-${Math.round(brR*10)},${Math.round(brC*10)}`;
+      }
+
       for (const [sheetName, ad] of Object.entries(annotationData)) {
-        if (!ad.isModified || !ad.drawingDataUrl) continue;
+        if (!ad.isModified) continue;
         if (ad.isStickyNote) continue; // 付箋は下のループで処理
+        if (!ad.drawingDataUrl && !(ad.pageDrawings && Object.values(ad.pageDrawings).some(Boolean))) continue;
 
         const figSheet = workbook.getWorksheet(sheetName);
         if (!figSheet) continue;
 
-        const match = ad.drawingDataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
-        if (!match) continue;
+        // 書き出すオーバーレイ一覧を構築: [{ rangeIdx, drawingUrl }]
+        const drawingsToWrite = [];
+        if (ad.pages && ad.pageDrawings) {
+          for (const [pIdx, url] of Object.entries(ad.pageDrawings)) {
+            if (url) drawingsToWrite.push({ pageIdx: Number(pIdx), drawingUrl: url });
+          }
+        } else if (ad.drawingDataUrl) {
+          drawingsToWrite.push({ pageIdx: 0, drawingUrl: ad.drawingDataUrl });
+        }
+        if (drawingsToWrite.length === 0) continue;
 
-        const ext = match[1] === 'jpg' ? 'jpeg' : match[1];
-        const imgId = workbook.addImage({ base64: match[2], extension: ext });
+        // 既存オーバーレイの除去
+        // originalImages に入っている最初の画像 (各ページの背景) は残し、それ以降で
+        // 同じ range を持つ画像 (=過去保存のオーバーレイ) を _media から外す
+        const origRanges = new Set((ad.originalImages || []).map(i => rangeKey(i.range)));
+        if (figSheet._media && origRanges.size > 0) {
+          const seen = new Set();
+          figSheet._media = figSheet._media.filter(m => {
+            if (m.type !== 'image') return true;
+            const key = rangeKey(m.range);
+            if (!origRanges.has(key)) return true;
+            if (seen.has(key)) {
+              // 2枚目以降の同range画像 = 過去オーバーレイ → 削除
+              console.log(`[annotation] 既存オーバーレイ除去: ${sheetName} range=${key}`);
+              return false;
+            }
+            seen.add(key);
+            return true;
+          });
+        }
 
-        if (ad.originalImages.length > 0) {
-          // 元画像と同じ位置に透過PNGとして重ねる
-          // row/col（小数=セル内オフセット含む）を使って正確に配置
-          const origRange = ad.originalImages[0].range;
-          const tlRow = origRange.tl.row ?? origRange.tl.nativeRow ?? 0;
-          const tlCol = origRange.tl.col ?? origRange.tl.nativeCol ?? 0;
-          const brRow = origRange.br?.row ?? origRange.br?.nativeRow ?? (tlRow + 30);
-          const brCol = origRange.br?.col ?? origRange.br?.nativeCol ?? (tlCol + 20);
-          figSheet.addImage(imgId, {
-            tl: { col: tlCol, row: tlRow },
-            br: { col: brCol, row: brRow },
-            editAs: 'oneCell'
-          });
-          console.log(`手書きメモ追加（透過PNG）: ${sheetName} tl=(${tlRow.toFixed(3)},${tlCol.toFixed(3)}) br=(${brRow.toFixed(3)},${brCol.toFixed(3)})`);
-        } else {
-          figSheet.addImage(imgId, {
-            tl: { col: 0, row: 0 },
-            br: { col: 20, row: 40 },
-            editAs: 'oneCell'
-          });
+        // ページ毎にオーバーレイを追加
+        for (const { pageIdx, drawingUrl } of drawingsToWrite) {
+          const match = drawingUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+          if (!match) continue;
+          const ext = match[1] === 'jpg' ? 'jpeg' : match[1];
+          const imgId = workbook.addImage({ base64: match[2], extension: ext });
+
+          const origImg = ad.originalImages?.[pageIdx] || ad.originalImages?.[0];
+          if (origImg) {
+            const origRange = origImg.range;
+            const tlRow = origRange.tl.row ?? origRange.tl.nativeRow ?? 0;
+            const tlCol = origRange.tl.col ?? origRange.tl.nativeCol ?? 0;
+            const brRow = origRange.br?.row ?? origRange.br?.nativeRow ?? (tlRow + 30);
+            const brCol = origRange.br?.col ?? origRange.br?.nativeCol ?? (tlCol + 20);
+            figSheet.addImage(imgId, {
+              tl: { col: tlCol, row: tlRow },
+              br: { col: brCol, row: brRow },
+              editAs: 'oneCell'
+            });
+            console.log(`手書きメモ追加（透過PNG）: ${sheetName} page=${pageIdx} tl=(${tlRow.toFixed(3)},${tlCol.toFixed(3)}) br=(${brRow.toFixed(3)},${brCol.toFixed(3)})`);
+          } else {
+            figSheet.addImage(imgId, {
+              tl: { col: 0, row: 0 },
+              br: { col: 20, row: 40 },
+              editAs: 'oneCell'
+            });
+          }
         }
       }
 
