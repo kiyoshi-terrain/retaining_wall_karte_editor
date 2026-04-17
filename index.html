@@ -4896,11 +4896,13 @@
         }
       });
 
-      if (!annotationData[sheetName]) {
+      // IDB復元で空エントリが先に作られている場合でも、必ずExcelから画像を再解析する。
+      // 既存の手書きデータ (drawingDataUrl, pageDrawings 等) は保持しつつ、
+      // backgroundDataUrl / pages / originalImages をExcel画像で上書きする。
+      const prevAd = annotationData[sheetName] || {};
+
+      {
         if (figImages.length > 1) {
-          // 損傷図(2) のような縦に並ぶ独立ページ図面か、
-          // fig Photo のような背景+マーカー重ねかを判定
-          // → 画像が縦に並んでいる (全画像が同じ列グループに属する) なら縦連結
           const allSameCol = figImages.every(img => {
             const c = img.range?.tl?.nativeCol ?? img.range?.tl?.col ?? 0;
             const c0 = figImages[0].range?.tl?.nativeCol ?? figImages[0].range?.tl?.col ?? 0;
@@ -4914,18 +4916,19 @@
               const rb = b.range?.tl?.nativeRow ?? b.range?.tl?.row ?? 0;
               return ra - rb;
             });
+            const cp = prevAd.currentPage || 0;
             annotationData[sheetName] = {
-              backgroundDataUrl: sortedPages[0].dataUrl, // 初期表示は1ページ目
-              drawingDataUrl: null,
-              compositeDataUrl: null,
-              isModified: false,
+              backgroundDataUrl: sortedPages[cp]?.dataUrl || sortedPages[0].dataUrl,
+              drawingDataUrl:    prevAd.pageDrawings?.[cp]    || prevAd.drawingDataUrl    || null,
+              drawObjects:       prevAd.pageDrawObjects?.[cp] || prevAd.drawObjects       || [],
+              compositeDataUrl:  prevAd.pageComposites?.[cp]  || prevAd.compositeDataUrl  || null,
+              isModified:        prevAd.isModified || false,
               originalImages: figImages,
-              pages: sortedPages,       // ページ配列
-              currentPage: 0,           // 現在のページ番号
-              // ページごとに独立した手書きレイヤー
-              pageDrawings: {},         // { pageIdx: drawingDataUrl (PNG) } 手書きPNG
-              pageDrawObjects: {},      // { pageIdx: [drawObject, ...] } 描画オブジェクト配列
-              pageComposites: {},       // { pageIdx: compositeDataUrl } プレビュー用合成画像
+              pages: sortedPages,
+              currentPage: cp,
+              pageDrawings:    prevAd.pageDrawings    || {},
+              pageDrawObjects: prevAd.pageDrawObjects || {},
+              pageComposites:  prevAd.pageComposites  || {},
             };
             renderFigSheetUI(sheet, sheetName);
             return;
@@ -4935,9 +4938,10 @@
           compositeFigImages(figImages, (compositeUrl) => {
             annotationData[sheetName] = {
               backgroundDataUrl: compositeUrl,
-              drawingDataUrl: null,
-              compositeDataUrl: null,
-              isModified: false,
+              drawingDataUrl:   prevAd.drawingDataUrl   || null,
+              drawObjects:      prevAd.drawObjects      || [],
+              compositeDataUrl: prevAd.compositeDataUrl || null,
+              isModified:       prevAd.isModified || false,
               originalImages: figImages,
             };
             renderFigSheetUI(sheet, sheetName);
@@ -4946,9 +4950,10 @@
         }
         annotationData[sheetName] = {
           backgroundDataUrl: figImages.length > 0 ? figImages[0].dataUrl : null,
-          drawingDataUrl: null,
-          compositeDataUrl: null,
-          isModified: false,
+          drawingDataUrl:   prevAd.drawingDataUrl   || null,
+          drawObjects:      prevAd.drawObjects      || [],
+          compositeDataUrl: prevAd.compositeDataUrl || null,
+          isModified:       prevAd.isModified || false,
           originalImages: figImages,
         };
       }
