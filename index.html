@@ -3307,54 +3307,51 @@
       photoData[currentPhotoIndex].filename = displayFilename;
       hasUnsavedChanges = true;
 
-      // dataUrl → Blob 変換 (GDriveリトライ対象にするため)
-      let rawBlob = null;
-      try {
-        const resp = await fetch(dataUrl);
-        rawBlob = await resp.blob();
-      } catch (err) {
-        console.warn('dataUrl→Blob変換失敗:', err);
-      }
-
-      // GPS注入（Capacitorカメラは dataUrl に EXIF 含まないため補完）
-      let gpsStatus = null;
-      if (rawBlob) {
-        try {
-          const pos = await getCurrentPosition();
-          rawBlob = await injectExifGps(rawBlob, pos.coords);
-          gpsStatus = 'ok';
-          console.log(`[GPS] ${label}: ${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)} (±${Math.round(pos.coords.accuracy)}m)`);
-        } catch (err) {
-          if (err && err.code === 1) gpsStatus = 'denied';
-          else if (err && err.code === 2) gpsStatus = 'unavailable';
-          else if (err && err.code === 3) gpsStatus = 'timeout';
-          else gpsStatus = 'unavailable';
-          console.warn(`[GPS] failed for ${label}:`, err);
-        }
-      }
-
-      // IDBに写真を即時保存（rawBlobも一緒に保存してGDriveリトライ可能にする）
-      idbSavePhoto(label, dataUrl, rawBlob, displayFilename);
-
-      // GDriveへ直接アップロード（ベストエフォート）
-      if (gdriveAccessToken && rawBlob) {
-        uploadRawPhotoToDriveBlob(rawBlob, displayFilename)
-          .then(() => idbMarkPhotoUploaded(label))
-          .catch(err => console.warn('Drive upload failed (will retry):', err));
-      }
-
-      // リトライキュードレイン
-      drainDriveRetryQueue();
-
+      // UI を即更新
       renderPhotoGrid();
       updateStats();
-      const gpsMsg = {
-        ok:          'Photo added (GPS OK)',
-        denied:      'Photo added (GPS denied — enable location)',
-        unavailable: 'Photo added (GPS unavailable)',
-        timeout:     'Photo added (GPS timeout)'
-      }[gpsStatus] || 'Photo added';
-      setStatus(gpsMsg, label);
+      setStatus('Photo added', label);
+
+      // ★ GPS / EXIF / IDB / Drive はバックグラウンド (UI 非ブロック)
+      (async () => {
+        let rawBlob = null;
+        try {
+          const resp = await fetch(dataUrl);
+          rawBlob = await resp.blob();
+        } catch (err) {
+          console.warn('dataUrl→Blob変換失敗:', err);
+        }
+        let gpsStatus = null;
+        if (rawBlob) {
+          try {
+            const pos = await getCurrentPosition();
+            rawBlob = await injectExifGps(rawBlob, pos.coords);
+            gpsStatus = 'ok';
+            console.log(`[GPS] ${label}: ${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)} (±${Math.round(pos.coords.accuracy)}m)`);
+          } catch (err) {
+            if (err && err.code === 1) gpsStatus = 'denied';
+            else if (err && err.code === 2) gpsStatus = 'unavailable';
+            else if (err && err.code === 3) gpsStatus = 'timeout';
+            else gpsStatus = 'unavailable';
+            console.warn(`[GPS] failed for ${label}:`, err);
+          }
+        }
+        try { idbSavePhoto(label, dataUrl, rawBlob, displayFilename); } catch (_) {}
+        if (gdriveAccessToken && rawBlob) {
+          uploadRawPhotoToDriveBlob(rawBlob, displayFilename)
+            .then(() => idbMarkPhotoUploaded(label))
+            .catch(err => console.warn('Drive upload failed (will retry):', err));
+        }
+        try { drainDriveRetryQueue(); } catch (_) {}
+        const gpsMsg = {
+          ok:          'Photo added (GPS OK)',
+          denied:      'Photo added (GPS denied — enable location)',
+          unavailable: 'Photo added (GPS unavailable)',
+          timeout:     'Photo added (GPS timeout)'
+        }[gpsStatus] || 'Photo added';
+        const cur = document.getElementById('status-text')?.textContent || '';
+        if (cur.startsWith('Photo added')) setStatus(gpsMsg, label);
+      })();
     }
 
     // ============================
@@ -7388,53 +7385,54 @@
         photoData[currentPhotoIndex].filename = displayFilename;
         hasUnsavedChanges = true;
 
-        // ① IDBに写真を即時保存（最優先 — Excel保存が壊れても復旧可能）
-        // GPS注入済みのrawBlobも一緒に保存（GDriveリトライ用）
-        let rawBlob = file;
-        let gpsStatus = null;  // 'ok' | 'denied' | 'timeout' | 'unavailable' | null
-        try {
-          const pos = await getCurrentPosition();
-          rawBlob = await injectExifGps(file, pos.coords);
-          gpsStatus = 'ok';
-          console.log(`[GPS] ${label}: ${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)} (±${Math.round(pos.coords.accuracy)}m)`);
-        } catch (err) {
-          // PositionError code: 1=PERMISSION_DENIED, 2=POSITION_UNAVAILABLE, 3=TIMEOUT
-          if (err && err.code === 1) gpsStatus = 'denied';
-          else if (err && err.code === 2) gpsStatus = 'unavailable';
-          else if (err && err.code === 3) gpsStatus = 'timeout';
-          else gpsStatus = 'unavailable';
-          console.warn(`[GPS] failed for ${label}:`, err);
-        }
-        idbSavePhoto(label, result.dataUrl, rawBlob, displayFilename);
-
-        // ② GDriveにRawアップロード（ベストエフォート）
-        if (gdriveAccessToken) {
-          uploadRawPhotoToDrive(file, displayFilename, label);
-        }
-
-        // ③ リトライキューのドレイン（ついでに前回失敗分を再送）
-        drainDriveRetryQueue();
-
+        // 写真を UI に即反映してから loading 解除 (GPS/EXIF/IDB/Drive は全部バックグラウンド)
         renderPhotoGrid();
         updateStats();
-        // GPS取得結果をステータスに反映
-        const gpsMsg = {
-          ok:          'Photo added (GPS OK)',
-          denied:      'Photo added (GPS denied — enable location)',
-          unavailable: 'Photo added (GPS unavailable)',
-          timeout:     'Photo added (GPS timeout)'
-        }[gpsStatus] || 'Photo added';
-        setStatus(gpsMsg, label);
+        setStatus('Photo added', label);
+        hideLoading();
 
-        if (statusFileId) {
-          updateStatusOnDrive(label, 'done');
-        }
+        // ★ GPS / EXIF / IDB / Drive はすべて非同期バックグラウンド (UI をブロックしない)
+        //   iPad Safari で GPS パーミッションが保留状態でも写真処理は即完了する
+        (async () => {
+          let rawBlob = file;
+          let gpsStatus = null;
+          try {
+            const pos = await getCurrentPosition();
+            rawBlob = await injectExifGps(file, pos.coords);
+            gpsStatus = 'ok';
+            console.log(`[GPS] ${label}: ${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)} (±${Math.round(pos.coords.accuracy)}m)`);
+          } catch (err) {
+            if (err && err.code === 1) gpsStatus = 'denied';
+            else if (err && err.code === 2) gpsStatus = 'unavailable';
+            else if (err && err.code === 3) gpsStatus = 'timeout';
+            else gpsStatus = 'unavailable';
+            console.warn(`[GPS] failed for ${label}:`, err);
+          }
+          try { idbSavePhoto(label, result.dataUrl, rawBlob, displayFilename); } catch (_) {}
+          if (gdriveAccessToken) {
+            try { uploadRawPhotoToDrive(file, displayFilename, label); } catch (_) {}
+          }
+          try { drainDriveRetryQueue(); } catch (_) {}
+          // GPS 結果をステータスに反映 (ただし別の操作で status が上書きされていたら静か)
+          const gpsMsg = {
+            ok:          'Photo added (GPS OK)',
+            denied:      'Photo added (GPS denied — enable location)',
+            unavailable: 'Photo added (GPS unavailable)',
+            timeout:     'Photo added (GPS timeout)'
+          }[gpsStatus] || 'Photo added';
+          // 直前のステータスがまだ "Photo added" 相当なら更新
+          const cur = document.getElementById('status-text')?.textContent || '';
+          if (cur.startsWith('Photo added')) setStatus(gpsMsg, label);
+          if (statusFileId) {
+            try { updateStatusOnDrive(label, 'done'); } catch (_) {}
+          }
+        })();
       } catch (err) {
         console.error('写真処理エラー:', err);
         alert('Failed to process photo');
+        hideLoading();
       }
 
-      hideLoading();
       e.target.value = '';
     }
 
