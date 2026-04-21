@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v31-fullscreen-cam';
+const CACHE_NAME = 'rw-karte-v32-lens-whitelist';
 const ASSETS = [
   './',
   './index.html',

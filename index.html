@@ -7795,36 +7795,54 @@
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
         const videos = devices.filter(d => d.kind === 'videoinput');
+        console.log('[lens] all videoinput:', videos.map(d => d.label));
 
-        // facingMode 判定: label から推測
-        //   iOS: "Back Camera", "Back Ultra Wide Camera", "Back Triple Camera", "Back Telephoto Camera" 等
-        //   Android: "camera2 0, facing back" 等
-        const isRear = (label) => /back|rear|環境|リア/i.test(label) || !/front|user|フロント/i.test(label);
+        // iOS 物理レンズのホワイトリスト (label に含まれるキーワード)
+        // "Back Camera" = メイン, "Back Ultra Wide Camera" = 広角, "Back Telephoto Camera" = 望遠
+        // "Front Camera" / "Front TrueDepth Camera" = フロント
+        // 除外: "Back Dual Wide", "Back Triple", "Back LiDAR Depth" 等の合成カメラ
+        const physicalLensPattern = /^(back camera|back ultra wide camera|back telephoto camera|front camera|front truedepth camera|camera2|カメラ)$/i;
+        const isPhysicalLens = (label) => {
+          if (!label) return false;
+          const l = label.trim();
+          if (physicalLensPattern.test(l)) return true;
+          if (/camera\s*\d+.*facing/i.test(l)) return true; // Android
+          return false;
+        };
+
         const lensHint = (label) => {
-          if (/ultra\s*wide|超広角|ultrawide/i.test(label)) return '広角';
+          if (/ultra\s*wide|超広角/i.test(label)) return '広角';
           if (/telephoto|望遠/i.test(label)) return '望遠';
-          if (/triple|dual|統合/i.test(label)) return '統合';
           return 'メイン';
         };
 
-        // 合成/仮想カメラを除外 (Triple, Dual, LiDAR 等は個別レンズと重複)
-        const isVirtual = (label) => /triple|dual|lidar|統合/i.test(label);
+        const isRear = (label) => /back|rear|環境|リア/i.test(label) || !/front|user|フロント/i.test(label);
         const matchFacing = (d) => overlayFacingMode === 'environment' ? isRear(d.label) : /front|user|フロント/i.test(d.label);
+
         let list = videos
-          .filter(d => matchFacing(d) && !isVirtual(d.label))
+          .filter(d => matchFacing(d) && isPhysicalLens(d.label))
           .map(d => ({
             deviceId: d.deviceId,
-            label: d.label || '(unlabeled)',
-            hint: lensHint(d.label || '')
+            label: d.label,
+            hint: lensHint(d.label)
           }));
 
+        // ホワイトリストで 0 件なら、ブラックリスト方式にフォールバック
         if (list.length === 0) {
-          list = videos.filter(d => !isVirtual(d.label)).map(d => ({
-            deviceId: d.deviceId,
-            label: d.label || '(unlabeled)',
-            hint: 'メイン'
-          }));
+          const isVirtual = (l) => /triple|dual|lidar|depth|統合/i.test(l);
+          list = videos
+            .filter(d => matchFacing(d) && !isVirtual(d.label || ''))
+            .map(d => ({
+              deviceId: d.deviceId,
+              label: d.label || '(unlabeled)',
+              hint: lensHint(d.label || '')
+            }));
         }
+        // それでも 0 件なら全部
+        if (list.length === 0) {
+          list = videos.map(d => ({ deviceId: d.deviceId, label: d.label || '(unlabeled)', hint: 'メイン' }));
+        }
+        console.log('[lens] filtered:', list.map(l => l.label));
 
         overlayLensList = list;
         // 現在のトラックの deviceId で idx を推定
