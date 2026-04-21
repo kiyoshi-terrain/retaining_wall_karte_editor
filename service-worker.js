@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v22-portrait-landscape';
+const CACHE_NAME = 'rw-karte-v23-rotate-cam';
 const ASSETS = [
   './',
   './index.html',
