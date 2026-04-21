@@ -7988,6 +7988,7 @@
     function setOverlayMode(mode) {
       overlayDisplayMode = mode;
       const stage = document.getElementById('overlay-camera-stage');
+      const videoWrap = document.getElementById('overlay-camera-video-wrap');
       const ghostOverlay = document.getElementById('overlay-camera-ghost-overlay');
       const ghostPanel = document.getElementById('overlay-camera-ghost-panel');
       const opacityWrap = document.getElementById('overlay-camera-opacity-wrap');
@@ -7998,9 +7999,21 @@
       const ghostSplit = document.getElementById('overlay-camera-ghost-split');
 
       if (mode === 'overlay') {
-        // 重ねる: video 単体 + ghost を video 上に絶対配置
-        //   この時は cover で枠いっぱいに表示 (ghost も同じ cover で揃う)
         stage.style.flexDirection = 'column';
+        // 元写真の比率に合わせたコンテナを復元
+        const ghostSrc = ghostOverlay.src;
+        if (ghostSrc) {
+          const tmpImg = new Image();
+          tmpImg.src = ghostSrc;
+          tmpImg.onload = () => {
+            const ar = tmpImg.naturalWidth / tmpImg.naturalHeight;
+            videoWrap.style.aspectRatio = String(ar);
+            videoWrap.style.flex = 'none';
+            videoWrap.style.width = '100%';
+            videoWrap.style.maxHeight = '100%';
+            videoWrap.style.margin = 'auto';
+          };
+        }
         video.style.objectFit = 'cover';
         ghostOverlay.style.objectFit = 'cover';
         ghostOverlay.style.display = 'block';
@@ -8010,11 +8023,14 @@
         btnOverlay.style.background = 'rgba(255,255,255,0.35)';
         btnSplit.style.background = 'rgba(255,255,255,0.15)';
       } else {
-        // 並列: LIVE と PREVIOUS を同条件で比較できるように両方 contain に統一。
-        //   カメラのフル画角 (切り取りなし) と前回写真全体を同じレターボックスで並べる。
-        //   分割方向はデバイス向きに合わせる (縦→row / 横→column)
+        // 並列: 縦持ちiPhoneで横向き写真を上下に並べる (column)
+        //   横持ちの場合は左右に並べる (row)
         const portrait = window.innerHeight >= window.innerWidth;
-        stage.style.flexDirection = portrait ? 'row' : 'column';
+        stage.style.flexDirection = portrait ? 'column' : 'row';
+        // aspect-ratio 制御を解除して flex:1 で均等分割
+        videoWrap.style.aspectRatio = '';
+        videoWrap.style.flex = '1';
+        videoWrap.style.margin = '';
         video.style.objectFit = 'contain';
         video.style.background = '#111';
         ghostSplit.style.objectFit = 'contain';

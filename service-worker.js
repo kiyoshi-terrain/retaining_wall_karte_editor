@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v21-aspect-match';
+const CACHE_NAME = 'rw-karte-v22-portrait-landscape';
 const ASSETS = [
   './',
   './index.html',
