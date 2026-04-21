@@ -7801,17 +7801,23 @@
           return 'メイン';
         };
 
-        // 現在の facing のみ対象
+        // 合成/仮想カメラを除外 (Triple, Dual, LiDAR 等は個別レンズと重複)
+        const isVirtual = (label) => /triple|dual|lidar|統合/i.test(label);
         const matchFacing = (d) => overlayFacingMode === 'environment' ? isRear(d.label) : /front|user|フロント/i.test(d.label);
-        let list = videos.filter(matchFacing).map(d => ({
-          deviceId: d.deviceId,
-          label: d.label || '(unlabeled)',
-          hint: lensHint(d.label || '')
-        }));
+        let list = videos
+          .filter(d => matchFacing(d) && !isVirtual(d.label))
+          .map(d => ({
+            deviceId: d.deviceId,
+            label: d.label || '(unlabeled)',
+            hint: lensHint(d.label || '')
+          }));
 
-        // フォールバック: facing で絞れなかった場合は全リアをまとめて (permission 未確定で label 空の時用)
         if (list.length === 0) {
-          list = videos.map(d => ({ deviceId: d.deviceId, label: d.label || '(unlabeled)', hint: 'メイン' }));
+          list = videos.filter(d => !isVirtual(d.label)).map(d => ({
+            deviceId: d.deviceId,
+            label: d.label || '(unlabeled)',
+            hint: 'メイン'
+          }));
         }
 
         overlayLensList = list;

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v29-crop-toggle';
+const CACHE_NAME = 'rw-karte-v30-lens-filter';
 const ASSETS = [
   './',
   './index.html',
