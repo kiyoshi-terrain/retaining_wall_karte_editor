@@ -7773,6 +7773,12 @@
           audio: false
         });
         video.srcObject = overlayStream;
+        video.addEventListener('loadedmetadata', () => {
+          if (video.videoHeight > video.videoWidth) {
+            overlayVideoRotation = 90;
+            applyVideoRotation();
+          }
+        }, { once: true });
         await enumerateOverlayLenses();
         setupOverlayZoomUI();
         updateOverlayQualityButtonLabel();
@@ -8052,18 +8058,18 @@
         opacityWrap.style.display = 'flex';
         btnOverlay.style.background = 'rgba(255,255,255,0.35)';
         btnSplit.style.background = 'rgba(255,255,255,0.15)';
+        applyVideoRotation();
       } else {
-        // 並列: 縦持ちiPhoneで横向き写真を上下に並べる (column)
-        //   横持ちの場合は左右に並べる (row)
-        const portrait = window.innerHeight >= window.innerWidth;
-        stage.style.flexDirection = portrait ? 'column' : 'row';
-        // aspect-ratio 制御を解除して flex:1 で均等分割
+        // 並列: 上下分割 (column) で横長写真を並べる
+        stage.style.flexDirection = 'column';
         videoWrap.style.aspectRatio = '';
         videoWrap.style.flex = '1';
         videoWrap.style.margin = '';
-        video.style.objectFit = 'contain';
+        video.style.objectFit = 'cover';
         video.style.background = '#111';
         ghostSplit.style.objectFit = 'contain';
+        // 回転状態を維持
+        applyVideoRotation();
         ghostOverlay.style.display = 'none';
         ghostPanel.style.display = 'block';
         opacityWrap.style.display = 'none';
