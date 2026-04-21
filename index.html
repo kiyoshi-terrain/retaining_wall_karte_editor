@@ -7706,11 +7706,11 @@
     let overlayDisplayMode = 'overlay';    // 'overlay' (重ねる) or 'split' (並列)
     // 画質プリセット (long side in px)。localStorage 永続化。
     const OVERLAY_QUALITY_PRESETS = [
-      { w: 1280, h: 720,  label: '1280 (HD)' },
-      { w: 1920, h: 1080, label: '1920 (Full HD)' },
-      { w: 2560, h: 1440, label: '2560 (QHD)' },
-      { w: 3840, h: 2160, label: '3840 (4K)' },
-      { w: 960,  h: 540,  label: '960 (省容量)' },
+      { w: 1280, h: 960,  label: '1280 (HD)' },
+      { w: 1920, h: 1440, label: '1920 (Full HD)' },
+      { w: 2560, h: 1920, label: '2560 (QHD)' },
+      { w: 3840, h: 2880, label: '3840 (4K)' },
+      { w: 960,  h: 720,  label: '960 (省容量)' },
     ];
     let overlayQualityIdx = parseInt(localStorage.getItem('retainingWallKarteCamQuality') || '0', 10);
     if (!OVERLAY_QUALITY_PRESETS[overlayQualityIdx]) overlayQualityIdx = 0;
