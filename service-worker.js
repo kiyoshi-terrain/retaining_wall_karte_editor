@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v24-4by3';
+const CACHE_NAME = 'rw-karte-v25-4by3-display';
 const ASSETS = [
   './',
   './index.html',

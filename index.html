@@ -7741,20 +7741,25 @@
       ghostOverlay.src = photo.imageBase64;
       ghostSplit.src = photo.imageBase64;
       labelEl.textContent = `${photo.label} — 位置合わせ撮影`;
+
+      // デフォルト 4:3 横長をコンテナに即適用
+      videoWrap.style.aspectRatio = String(4 / 3);
+      videoWrap.style.flex = 'none';
+      videoWrap.style.width = '100%';
+      videoWrap.style.maxHeight = '100%';
+      videoWrap.style.margin = 'auto';
+
       setOverlayMode(overlayDisplayMode);
       modal.style.display = 'block';
 
-      // 元写真のアスペクト比を取得してビデオコンテナに適用
-      // → video と ghost が同じ比率で表示され、crop もレターボックスも発生しない
+      // 元写真の実比率が 4:3 と異なれば上書き
       const ghostImg = new Image();
       ghostImg.src = photo.imageBase64;
       ghostImg.onload = () => {
         const ar = ghostImg.naturalWidth / ghostImg.naturalHeight;
-        videoWrap.style.aspectRatio = String(ar);
-        videoWrap.style.flex = 'none';
-        videoWrap.style.width = '100%';
-        videoWrap.style.maxHeight = '100%';
-        videoWrap.style.margin = 'auto';
+        if (Math.abs(ar - 4 / 3) > 0.05) {
+          videoWrap.style.aspectRatio = String(ar);
+        }
       };
 
       try {
