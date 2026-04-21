@@ -1777,10 +1777,10 @@
       <div id="overlay-camera-video-wrap"
            style="position:relative;flex:1;overflow:hidden;background:#000;min-height:0;">
         <video id="overlay-camera-video" autoplay playsinline muted
-               style="width:100%;height:100%;object-fit:cover;background:#000;"></video>
+               style="width:100%;height:100%;object-fit:contain;background:#000;"></video>
         <!-- オーバーレイモード時: ghost をこの video 上に絶対配置 -->
         <img id="overlay-camera-ghost-overlay" alt=""
-             style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0.35;pointer-events:none;display:block;">
+             style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0.35;pointer-events:none;display:block;">
         <div style="position:absolute;top:4px;left:8px;color:#fff;font-size:11px;background:rgba(0,0,0,0.5);padding:2px 8px;">LIVE</div>
       </div>
       <!-- 並列モード用: ghost をこの panel に配置 (overlay モード時は非表示) -->
