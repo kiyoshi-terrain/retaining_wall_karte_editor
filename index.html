@@ -8593,6 +8593,43 @@
       targetCell.appendChild(isElem);
     }
 
+    // ★ 文字列ベースのセル値書き換え (DOMParser/XMLSerializer を一切通さない)
+    //   シートXML全体を再シリアライズしないため、<cols>/<sheetFormatPr>/<row ht>等の
+    //   属性がバイト単位で保全され、図形オブジェクトの位置ズレが起きない。
+    function writeInlineStringCellRaw(xmlStr, cellRef, text) {
+      const escapedText = escapeXml(text);
+      const inlineContent = `<is><t xml:space="preserve">${escapedText}</t></is>`;
+
+      // 既存セルの検索: <c r="A28" ...>...</c> or <c r="A28" ... />
+      const cellPatternFull = new RegExp(
+        `(<c\\b[^>]*\\br="${cellRef}"[^>]*?)(?:>([\\s\\S]*?)</c>|/>)`,
+      );
+      const match = xmlStr.match(cellPatternFull);
+
+      if (match) {
+        let openTag = match[1];
+        openTag = openTag.replace(/\s+t="[^"]*"/, '');
+        openTag += ' t="inlineStr"';
+        return xmlStr.replace(match[0], `${openTag}>${inlineContent}</c>`);
+      }
+
+      // セルが存在しない場合: 該当行の末尾に追加
+      const rowMatch = cellRef.match(/^([A-Z]+)(\d+)$/);
+      if (!rowMatch) return xmlStr;
+      const rowNum = rowMatch[2];
+      const newCell = `<c r="${cellRef}" t="inlineStr">${inlineContent}</c>`;
+
+      const rowPattern = new RegExp(`(<row\\b[^>]*\\br="${rowNum}"[^>]*>)([\\s\\S]*?)(</row>)`);
+      const rowMatchResult = xmlStr.match(rowPattern);
+      if (rowMatchResult) {
+        return xmlStr.replace(rowMatchResult[0],
+          `${rowMatchResult[1]}${rowMatchResult[2]}${newCell}${rowMatchResult[3]}`);
+      }
+
+      // 行自体がない場合: sheetData 末尾に行ごと追加
+      return xmlStr.replace('</sheetData>', `<row r="${rowNum}">${newCell}</row></sheetData>`);
+    }
+
     // DOMベースのセル値クリア（docは既にパース済み、破壊的に変更）
     function clearCellValueDOM(doc, cellRef) {
       const allCells = doc.getElementsByTagName('c');
@@ -8644,20 +8681,14 @@
         : [];
       let nextPicId = (existingPicIds.length ? Math.max(...existingPicIds) : 0) + 1;
 
-      // シートXMLを1回だけDOMパースし、全セル操作をバッチ処理
-      const sheetDoc = noChanges ? null : parseSheetXmlToDOM(sheetXml);
-      if (!noChanges && !sheetDoc) {
-        throw new Error('Photo(2) シートXMLのパースに失敗しました');
-      }
-
-      // 各変更photoを処理
+      // 各変更photoを処理 (文字列ベース — DOMParser/XMLSerializer 不使用で原本XML保全)
       for (const photo of modifiedPhotos) {
-        // A. コメント更新（DOM操作 — パース/シリアライズなしで高速）
+        // A. コメント更新 (文字列操作のみ: 列幅/行高さ/図形座標に一切触れない)
         const commentText = photo.comment
           ? `（コメント）\n${photo.comment}`
           : '（コメント）';
         const commentRef = colNumToLetter(photo.commentCol) + photo.commentRow;
-        writeInlineStringCellDOM(sheetDoc, commentRef, commentText);
+        sheetXml = writeInlineStringCellRaw(sheetXml, commentRef, commentText);
 
         // B. 新規画像
         if (photo.imageBase64 && !photo.imageBase64.startsWith('blob:')) {
@@ -8751,9 +8782,7 @@
           // 5. 画像セル(labelRow,labelCol)にファイル名を書き込む（旧パス文字列を置換）
           const imgCellRef = colNumToLetter(photo.labelCol) + photo.labelRow;
           if (photo.filename) {
-            writeInlineStringCellDOM(sheetDoc, imgCellRef, photo.filename);
-          } else {
-            clearCellValueDOM(sheetDoc, imgCellRef);
+            sheetXml = writeInlineStringCellRaw(sheetXml, imgCellRef, photo.filename);
           }
 
           console.log(`[delta-save] 画像追加: ${photo.label} → media/${mediaName} anchor=${newRId} picId=${nextPicId - 1}`);
@@ -8889,8 +8918,8 @@
       // 書き戻し (変更があった場合のみ)
       let buffer;
       if (!noChanges) {
-        // DOM操作結果を1回だけシリアライズ
-        zip.file(sheetPath, serializeSheetDOM(sheetDoc));
+        // 文字列ベースで変更済みの sheetXml をそのまま書き戻し（DOMParser不使用）
+        zip.file(sheetPath, sheetXml);
         if (drawingXml && drawingPath) zip.file(drawingPath, drawingXml);
         if (drawingRelsXml && drawingRelsPath) zip.file(drawingRelsPath, drawingRelsXml);
         if (ctXml) zip.file('[Content_Types].xml', ctXml);
