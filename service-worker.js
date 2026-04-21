@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v33-split-default';
+const CACHE_NAME = 'rw-karte-v34-exif-date';
 const ASSETS = [
   './',
   './index.html',

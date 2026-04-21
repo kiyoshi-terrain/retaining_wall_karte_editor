@@ -3180,6 +3180,35 @@
       return new Blob([arr], { type: 'image/jpeg' });
     }
 
+    async function injectExifDateOnly(file) {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      let exifObj;
+      try { exifObj = piexif.load(dataUrl); } catch (_) {
+        exifObj = { '0th': {}, 'Exif': {}, 'GPS': {}, '1st': {} };
+      }
+      const now = new Date();
+      const dateStr = now.getFullYear() + ':'
+        + String(now.getMonth() + 1).padStart(2, '0') + ':'
+        + String(now.getDate()).padStart(2, '0') + ' '
+        + String(now.getHours()).padStart(2, '0') + ':'
+        + String(now.getMinutes()).padStart(2, '0') + ':'
+        + String(now.getSeconds()).padStart(2, '0');
+      exifObj.Exif[piexif.ExifIFD.DateTimeOriginal] = dateStr;
+      exifObj.Exif[piexif.ExifIFD.DateTimeDigitized] = dateStr;
+      exifObj['0th'][piexif.ImageIFD.DateTime] = dateStr;
+      const exifBytes = piexif.dump(exifObj);
+      const newDataUrl = piexif.insert(exifBytes, dataUrl);
+      const bin = atob(newDataUrl.split(',')[1]);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return new Blob([arr], { type: 'image/jpeg' });
+    }
+
     // Google Drive にRaw Photo原本をアップロード（GPS+撮影日時EXIF付与）
     async function uploadRawPhotoToDrive(file, filename, label) {
       if (!gdriveAccessToken) return;
@@ -3550,6 +3579,7 @@
             else if (err && err.code === 3) gpsStatus = 'timeout';
             else gpsStatus = 'unavailable';
             console.warn(`[GPS] failed for ${label}:`, err);
+            try { rawBlob = await injectExifDateOnly(rawBlob instanceof Blob ? rawBlob : file); } catch (_) {}
           }
         }
         try { idbSavePhoto(label, dataUrl, rawBlob, displayFilename); } catch (_) {}
@@ -8415,6 +8445,7 @@
             else if (err && err.code === 3) gpsStatus = 'timeout';
             else gpsStatus = 'unavailable';
             console.warn(`[GPS] failed for ${label}:`, err);
+            try { rawBlob = await injectExifDateOnly(file); } catch (_) {}
           }
           try { idbSavePhoto(label, result.dataUrl, rawBlob, displayFilename); } catch (_) {}
           if (gdriveAccessToken) {
