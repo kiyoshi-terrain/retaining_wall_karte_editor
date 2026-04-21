@@ -1819,7 +1819,7 @@
       </div>
       <div style="display:flex;gap:16px;align-items:center;">
         <button onclick="flipOverlayCamera()" style="background:rgba(255,255,255,0.15);color:#fff;border:2px solid #fff;border-radius:50%;width:44px;height:44px;font-size:16px;cursor:pointer;" title="フロント/リア切替">↺</button>
-        <button onclick="rotateOverlayVideo()" id="overlay-camera-rotate-btn" style="background:rgba(255,255,255,0.15);color:#fff;border:2px solid #fff;border-radius:50%;width:44px;height:44px;font-size:14px;cursor:pointer;" title="カメラ回転">⟳90</button>
+        <button onclick="toggleOverlayCrop()" id="overlay-camera-crop-btn" style="background:rgba(255,255,255,0.35);color:#fff;border:2px solid #fff;border-radius:8px;width:44px;height:44px;font-size:11px;cursor:pointer;line-height:1.2;" title="横クロップ切替">横</button>
         <button onclick="captureOverlayPhoto()" id="overlay-camera-shutter"
                 style="background:#fff;border:4px solid #fff;border-radius:50%;width:68px;height:68px;cursor:pointer;box-shadow:0 0 0 4px rgba(0,0,0,0.3);"></button>
         <button onclick="toggleOverlayVisible()" id="overlay-camera-toggle-ghost" style="background:rgba(255,255,255,0.15);color:#fff;border:2px solid #fff;border-radius:50%;width:44px;height:44px;font-size:14px;cursor:pointer;" title="前回写真の表示切替">👻</button>
@@ -7939,31 +7939,38 @@
       btn.textContent = `画質: ${preset.label}`;
     }
 
-    let overlayVideoRotation = 0;
+    let overlayCropLandscape = true;
 
-    function rotateOverlayVideo() {
-      overlayVideoRotation = (overlayVideoRotation + 90) % 360;
-      applyVideoRotation();
+    function toggleOverlayCrop() {
+      overlayCropLandscape = !overlayCropLandscape;
+      applyOverlayCrop();
+      const btn = document.getElementById('overlay-camera-crop-btn');
+      btn.textContent = overlayCropLandscape ? '横' : '縦';
+      btn.style.background = overlayCropLandscape ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.15)';
     }
 
-    function applyVideoRotation() {
+    function applyOverlayCrop() {
       const video = document.getElementById('overlay-camera-video');
-      const wrap = document.getElementById('overlay-camera-video-wrap');
-      if (overlayVideoRotation === 0) {
-        video.style.transform = '';
-        video.style.transformOrigin = '';
-        return;
+      const videoWrap = document.getElementById('overlay-camera-video-wrap');
+      if (overlayCropLandscape) {
+        videoWrap.style.aspectRatio = String(4 / 3);
+        videoWrap.style.flex = 'none';
+        videoWrap.style.width = '100%';
+        videoWrap.style.maxHeight = '100%';
+        videoWrap.style.margin = 'auto';
+        video.style.objectFit = 'cover';
+      } else {
+        videoWrap.style.aspectRatio = '';
+        videoWrap.style.flex = '1';
+        videoWrap.style.width = '';
+        videoWrap.style.maxHeight = '';
+        videoWrap.style.margin = '';
+        video.style.objectFit = 'contain';
       }
-      const w = wrap.clientWidth;
-      const h = wrap.clientHeight;
-      const isSwapped = (overlayVideoRotation === 90 || overlayVideoRotation === 270);
-      const scale = isSwapped ? Math.max(w / h, h / w) : 1;
-      video.style.transformOrigin = 'center center';
-      video.style.transform = `rotate(-${overlayVideoRotation}deg) scale(${scale})`;
     }
 
     function closeOverlayCamera() {
-      overlayVideoRotation = 0;
+      overlayCropLandscape = true;
       const modal = document.getElementById('overlay-camera');
       const video = document.getElementById('overlay-camera-video');
       if (overlayStream) {
@@ -8091,20 +8098,18 @@
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
 
-      // object-fit: cover で見えている領域だけをクロップして撮影
-      // コンテナの比率 (4:3 横長等) に合わせて中央切り出し
-      const wrapAr = videoWrap.clientWidth / videoWrap.clientHeight;
-      const videoAr = vw / vh;
-
       let sx = 0, sy = 0, sw = vw, sh = vh;
-      if (videoAr > wrapAr) {
-        // 映像が横に広い → 左右クロップ
-        sw = Math.round(vh * wrapAr);
-        sx = Math.round((vw - sw) / 2);
-      } else {
-        // 映像が縦に長い → 上下クロップ (縦持ち+横コンテナの典型パターン)
-        sh = Math.round(vw / wrapAr);
-        sy = Math.round((vh - sh) / 2);
+      if (overlayCropLandscape) {
+        // 横クロップ: コンテナの比率に合わせて中央切り出し
+        const wrapAr = videoWrap.clientWidth / videoWrap.clientHeight;
+        const videoAr = vw / vh;
+        if (videoAr > wrapAr) {
+          sw = Math.round(vh * wrapAr);
+          sx = Math.round((vw - sw) / 2);
+        } else {
+          sh = Math.round(vw / wrapAr);
+          sy = Math.round((vh - sh) / 2);
+        }
       }
       canvas.width = sw;
       canvas.height = sh;
