@@ -7752,6 +7752,12 @@
       setOverlayMode(overlayDisplayMode);
       modal.style.display = 'block';
 
+      // ブラウザ UI を隠してフルスクリーン化 (iOS 16.4+, Chrome 対応)
+      try {
+        if (modal.requestFullscreen) await modal.requestFullscreen();
+        else if (modal.webkitRequestFullscreen) await modal.webkitRequestFullscreen();
+      } catch (_) {}
+
       // 元写真の実比率が 4:3 と異なれば上書き
       const ghostImg = new Image();
       ghostImg.src = photo.imageBase64;
@@ -7985,6 +7991,10 @@
       }
       video.srcObject = null;
       modal.style.display = 'none';
+      try {
+        if (document.fullscreenElement) document.exitFullscreen();
+        else if (document.webkitFullscreenElement) document.webkitExitFullscreen();
+      } catch (_) {}
       const videoWrap = document.getElementById('overlay-camera-video-wrap');
       videoWrap.style.aspectRatio = '';
       videoWrap.style.flex = '1';
