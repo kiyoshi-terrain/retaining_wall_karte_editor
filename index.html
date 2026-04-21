@@ -1769,22 +1769,10 @@
 
   <!-- アクションシート（写真選択方法） -->
   <!-- Overlay Camera: オーバーレイ表示 + 並列表示 2モード切替 -->
-  <div id="overlay-camera" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;flex-direction:column;">
-    <!-- トップバー -->
-    <div id="overlay-camera-top"
-         style="position:relative;padding:10px 16px;padding-top:calc(10px + env(safe-area-inset-top));background:#000;color:#fff;display:flex;align-items:center;gap:12px;z-index:2;flex-shrink:0;">
-      <button onclick="closeOverlayCamera()" style="background:rgba(255,255,255,0.15);color:#fff;border:1px solid #fff;padding:6px 12px;font-family:inherit;cursor:pointer;">✕ Close</button>
-      <span id="overlay-camera-label" style="font-weight:700;"></span>
-      <span style="flex:1;"></span>
-      <button onclick="setOverlayMode('overlay')" id="overlay-camera-mode-overlay"
-              style="background:rgba(255,255,255,0.25);color:#fff;border:1px solid #fff;padding:6px 10px;font-family:inherit;cursor:pointer;font-size:12px;">重ねる</button>
-      <button onclick="setOverlayMode('split')" id="overlay-camera-mode-split"
-              style="background:rgba(255,255,255,0.15);color:#fff;border:1px solid #fff;padding:6px 10px;font-family:inherit;cursor:pointer;font-size:12px;">並列</button>
-    </div>
-
-    <!-- ステージ: top/bottom バーに挟まれた中央領域 -->
+  <div id="overlay-camera" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;">
+    <!-- ステージ: 画面全体を使う -->
     <div id="overlay-camera-stage" data-mode="overlay"
-         style="position:relative;flex:1;display:flex;flex-direction:column;min-height:0;">
+         style="position:absolute;inset:0;display:flex;flex-direction:column;">
       <!-- ビデオ(カメラ) -->
       <div id="overlay-camera-video-wrap"
            style="position:relative;flex:1;overflow:hidden;background:#000;min-height:0;">
@@ -1804,17 +1792,25 @@
       </div>
     </div>
 
-    <!-- ボトムバー (コントロール) — ステージの外、重ならない -->
-    <div id="overlay-camera-bottom"
-         style="position:relative;padding:10px 16px;padding-bottom:calc(10px + env(safe-area-inset-bottom));background:#000;display:flex;flex-direction:column;align-items:center;gap:8px;z-index:2;flex-shrink:0;">
-      <!-- 透明度スライダー: overlay モードでのみ表示 -->
+    <!-- トップバー (stage の上に浮かせる) -->
+    <div style="position:absolute;top:0;left:0;right:0;padding:8px 16px;padding-top:calc(8px + env(safe-area-inset-top));background:linear-gradient(to bottom,rgba(0,0,0,0.6),transparent);color:#fff;display:flex;align-items:center;gap:12px;z-index:2;">
+      <button onclick="closeOverlayCamera()" style="background:rgba(255,255,255,0.15);color:#fff;border:1px solid #fff;padding:6px 12px;font-family:inherit;cursor:pointer;">✕ Close</button>
+      <span id="overlay-camera-label" style="font-weight:700;"></span>
+      <span style="flex:1;"></span>
+      <button onclick="setOverlayMode('overlay')" id="overlay-camera-mode-overlay"
+              style="background:rgba(255,255,255,0.25);color:#fff;border:1px solid #fff;padding:6px 10px;font-family:inherit;cursor:pointer;font-size:12px;">重ねる</button>
+      <button onclick="setOverlayMode('split')" id="overlay-camera-mode-split"
+              style="background:rgba(255,255,255,0.15);color:#fff;border:1px solid #fff;padding:6px 10px;font-family:inherit;cursor:pointer;font-size:12px;">並列</button>
+    </div>
+
+    <!-- ボトムバー (stage の上に浮かせる、半透明) -->
+    <div style="position:absolute;bottom:0;left:0;right:0;padding:8px 16px;padding-bottom:calc(8px + env(safe-area-inset-bottom));background:linear-gradient(to top,rgba(0,0,0,0.5),transparent);display:flex;flex-direction:column;align-items:center;gap:6px;z-index:2;">
       <div id="overlay-camera-opacity-wrap" style="display:flex;align-items:center;gap:10px;color:#fff;width:100%;max-width:480px;">
         <span style="font-size:11px;min-width:40px;">透明</span>
         <input type="range" id="overlay-camera-opacity" min="0" max="100" value="35" step="5"
                style="flex:1;" oninput="updateOverlayOpacity(this.value)">
         <span style="font-size:11px;min-width:40px;text-align:right;">不透明</span>
       </div>
-      <!-- ズームスライダー (ハードウェアズーム対応時のみ表示) -->
       <div id="overlay-camera-zoom-wrap" style="display:none;align-items:center;gap:10px;color:#fff;width:100%;max-width:480px;">
         <span style="font-size:11px;min-width:40px;" id="overlay-camera-zoom-min">1×</span>
         <input type="range" id="overlay-camera-zoom" min="1" max="3" step="0.1" value="1"
@@ -7744,7 +7740,7 @@
       ghostSplit.src = photo.imageBase64;
       labelEl.textContent = `${photo.label} — 位置合わせ撮影`;
       setOverlayMode(overlayDisplayMode); // 現在のモードを反映
-      modal.style.display = 'flex';
+      modal.style.display = 'block';
 
       try {
         const preset = OVERLAY_QUALITY_PRESETS[overlayQualityIdx];
@@ -8016,7 +8012,7 @@
 
     // 画面回転で並列モードの flex-direction を自動切替
     window.addEventListener('resize', () => {
-      if (document.getElementById('overlay-camera').style.display === 'flex' && overlayDisplayMode === 'split') {
+      if (document.getElementById('overlay-camera').style.display === 'block' && overlayDisplayMode === 'split') {
         setOverlayMode('split');
       }
     });

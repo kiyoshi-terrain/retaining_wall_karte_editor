@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v19-camera-overlay';
+const CACHE_NAME = 'rw-karte-v20-fullscreen-camera';
 const ASSETS = [
   './',
   './index.html',
