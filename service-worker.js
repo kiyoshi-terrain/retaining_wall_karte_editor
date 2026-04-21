@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v20-fullscreen-camera';
+const CACHE_NAME = 'rw-karte-v21-aspect-match';
 const ASSETS = [
   './',
   './index.html',

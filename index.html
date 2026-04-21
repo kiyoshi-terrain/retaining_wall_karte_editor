@@ -1780,7 +1780,7 @@
                style="width:100%;height:100%;object-fit:cover;background:#000;"></video>
         <!-- オーバーレイモード時: ghost をこの video 上に絶対配置 -->
         <img id="overlay-camera-ghost-overlay" alt=""
-             style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0.35;pointer-events:none;display:block;">
+             style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0.35;pointer-events:none;display:block;">
         <div style="position:absolute;top:4px;left:8px;color:#fff;font-size:11px;background:rgba(0,0,0,0.5);padding:2px 8px;">LIVE</div>
       </div>
       <!-- 並列モード用: ghost をこの panel に配置 (overlay モード時は非表示) -->
@@ -7735,12 +7735,26 @@
       const ghostOverlay = document.getElementById('overlay-camera-ghost-overlay');
       const ghostSplit = document.getElementById('overlay-camera-ghost-split');
       const labelEl = document.getElementById('overlay-camera-label');
+      const videoWrap = document.getElementById('overlay-camera-video-wrap');
 
       ghostOverlay.src = photo.imageBase64;
       ghostSplit.src = photo.imageBase64;
       labelEl.textContent = `${photo.label} — 位置合わせ撮影`;
-      setOverlayMode(overlayDisplayMode); // 現在のモードを反映
+      setOverlayMode(overlayDisplayMode);
       modal.style.display = 'block';
+
+      // 元写真のアスペクト比を取得してビデオコンテナに適用
+      // → video と ghost が同じ比率で表示され、crop もレターボックスも発生しない
+      const ghostImg = new Image();
+      ghostImg.src = photo.imageBase64;
+      ghostImg.onload = () => {
+        const ar = ghostImg.naturalWidth / ghostImg.naturalHeight;
+        videoWrap.style.aspectRatio = String(ar);
+        videoWrap.style.flex = 'none';
+        videoWrap.style.width = '100%';
+        videoWrap.style.maxHeight = '100%';
+        videoWrap.style.margin = 'auto';
+      };
 
       try {
         const preset = OVERLAY_QUALITY_PRESETS[overlayQualityIdx];
@@ -7753,9 +7767,7 @@
           audio: false
         });
         video.srcObject = overlayStream;
-        // デバイス列挙 (初回の getUserMedia 許可後に label が取得可能になる)
         await enumerateOverlayLenses();
-        // ズーム対応チェック & UI 反映
         setupOverlayZoomUI();
         updateOverlayQualityButtonLabel();
       } catch (err) {
@@ -7930,6 +7942,10 @@
       }
       video.srcObject = null;
       modal.style.display = 'none';
+      const videoWrap = document.getElementById('overlay-camera-video-wrap');
+      videoWrap.style.aspectRatio = '';
+      videoWrap.style.flex = '1';
+      videoWrap.style.margin = '';
     }
 
     async function flipOverlayCamera() {
