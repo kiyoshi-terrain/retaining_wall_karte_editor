@@ -8081,6 +8081,7 @@
 
     async function captureOverlayPhoto() {
       const video = document.getElementById('overlay-camera-video');
+      const videoWrap = document.getElementById('overlay-camera-video-wrap');
       if (!video || !video.videoWidth) {
         alert('カメラがまだ起動していません');
         return;
@@ -8091,24 +8092,24 @@
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
 
-      const rot = overlayVideoRotation % 360;
-      if (rot === 90 || rot === 270) {
-        canvas.width = vh;
-        canvas.height = vw;
-        ctx.translate(canvas.width / 2, canvas.height / 2);
-        ctx.rotate(-rot * Math.PI / 180);
-        ctx.drawImage(video, -vw / 2, -vh / 2, vw, vh);
-      } else if (rot === 180) {
-        canvas.width = vw;
-        canvas.height = vh;
-        ctx.translate(canvas.width / 2, canvas.height / 2);
-        ctx.rotate(Math.PI);
-        ctx.drawImage(video, -vw / 2, -vh / 2, vw, vh);
+      // object-fit: cover で見えている領域だけをクロップして撮影
+      // コンテナの比率 (4:3 横長等) に合わせて中央切り出し
+      const wrapAr = videoWrap.clientWidth / videoWrap.clientHeight;
+      const videoAr = vw / vh;
+
+      let sx = 0, sy = 0, sw = vw, sh = vh;
+      if (videoAr > wrapAr) {
+        // 映像が横に広い → 左右クロップ
+        sw = Math.round(vh * wrapAr);
+        sx = Math.round((vw - sw) / 2);
       } else {
-        canvas.width = vw;
-        canvas.height = vh;
-        ctx.drawImage(video, 0, 0, vw, vh);
+        // 映像が縦に長い → 上下クロップ (縦持ち+横コンテナの典型パターン)
+        sh = Math.round(vw / wrapAr);
+        sy = Math.round((vh - sh) / 2);
       }
+      canvas.width = sw;
+      canvas.height = sh;
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
 
       // Blob 経由で File 化 (既存の handlePhotoSelect と同じパイプラインに流す)
       const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92));
