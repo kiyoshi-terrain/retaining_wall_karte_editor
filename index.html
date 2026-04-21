@@ -7773,12 +7773,6 @@
           audio: false
         });
         video.srcObject = overlayStream;
-        video.addEventListener('loadedmetadata', () => {
-          if (video.videoHeight > video.videoWidth) {
-            overlayVideoRotation = 90;
-            applyVideoRotation();
-          }
-        }, { once: true });
         await enumerateOverlayLenses();
         setupOverlayZoomUI();
         updateOverlayQualityButtonLabel();
@@ -8058,18 +8052,17 @@
         opacityWrap.style.display = 'flex';
         btnOverlay.style.background = 'rgba(255,255,255,0.35)';
         btnSplit.style.background = 'rgba(255,255,255,0.15)';
-        applyVideoRotation();
       } else {
-        // 並列: 上下分割 (column) で横長写真を並べる
+        // 並列: 上下分割 — 両パネルとも 4:3 横長コンテナで統一
         stage.style.flexDirection = 'column';
-        videoWrap.style.aspectRatio = '';
-        videoWrap.style.flex = '1';
-        videoWrap.style.margin = '';
+        videoWrap.style.aspectRatio = String(4 / 3);
+        videoWrap.style.flex = 'none';
+        videoWrap.style.width = '100%';
+        videoWrap.style.maxHeight = '50%';
+        videoWrap.style.margin = '0';
         video.style.objectFit = 'cover';
-        video.style.background = '#111';
+        video.style.background = '#000';
         ghostSplit.style.objectFit = 'contain';
-        // 回転状態を維持
-        applyVideoRotation();
         ghostOverlay.style.display = 'none';
         ghostPanel.style.display = 'block';
         opacityWrap.style.display = 'none';

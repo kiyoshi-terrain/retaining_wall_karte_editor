@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v27-auto-landscape';
+const CACHE_NAME = 'rw-karte-v28-crop-landscape';
 const ASSETS = [
   './',
   './index.html',
