@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v16-lens-picker';
+const CACHE_NAME = 'rw-karte-v17-contain-fix';
 const ASSETS = [
   './',
   './index.html',
