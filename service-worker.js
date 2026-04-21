@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v32-lens-whitelist';
+const CACHE_NAME = 'rw-karte-v33-split-default';
 const ASSETS = [
   './',
   './index.html',
