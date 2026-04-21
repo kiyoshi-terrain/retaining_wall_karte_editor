@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v35-split-row';
+const CACHE_NAME = 'rw-karte-v36-split-cover';
 const ASSETS = [
   './',
   './index.html',
