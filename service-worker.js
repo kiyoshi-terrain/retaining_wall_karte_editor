@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v46-debug-flow';
+const CACHE_NAME = 'rw-karte-v47-clear-composite';
 const ASSETS = [
   './',
   './index.html',

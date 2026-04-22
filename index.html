@@ -8431,17 +8431,13 @@
     // 写真選択ハンドラ
     async function handlePhotoSelect(e) {
       const file = e.target.files[0];
-      if (!file) { console.error('[photo] no file'); return; }
+      if (!file) return;
 
       showLoading('Processing photo...');
-      setStatus(`[1] file=${file.name} size=${file.size} idx=${currentPhotoIndex}`, '');
 
       try {
         const displayFilename = resolvePhotoFilename(file);
-        setStatus(`[2] normalizing ${displayFilename}...`, '');
-
         const result = await normalizeImage(file, photoResolution);
-        setStatus(`[3] normalized ${result.width}x${result.height} dataUrl=${result.dataUrl?.length || 0}chars`, '');
 
         const label = photoData[currentPhotoIndex].label;
 
@@ -8451,6 +8447,7 @@
         photoData[currentPhotoIndex].isModified = true;
         photoData[currentPhotoIndex].isDummy = false;
         photoData[currentPhotoIndex].filename = displayFilename;
+        photoData[currentPhotoIndex].compositeDataUrl = null;
         hasUnsavedChanges = true;
 
         // 写真を UI に即反映してから loading 解除 (GPS/EXIF/IDB/Drive は全部バックグラウンド)
