@@ -4780,9 +4780,9 @@
         const image = workbook.getImage(imageId);
 
         if (image && image.buffer) {
-          // Blob URLを使用（base64変換なし、メモリ効率大幅改善）
-          const blob = new Blob([new Uint8Array(image.buffer)], { type: `image/${image.extension || 'jpeg'}` });
-          const dataUrl = URL.createObjectURL(blob);
+          const ext = image.extension || 'jpeg';
+          const base64 = btoa(new Uint8Array(image.buffer).reduce((s, b) => s + String.fromCharCode(b), ''));
+          const dataUrl = `data:image/${ext};base64,${base64}`;
 
           // アンカー位置を取得
           let row = 0, col = 0;
@@ -5279,8 +5279,9 @@
       images.forEach(img => {
         const image = workbook.getImage(img.imageId);
         if (image && image.buffer) {
-          const blob = new Blob([new Uint8Array(image.buffer)], { type: `image/${image.extension || 'jpeg'}` });
-          const dataUrl = URL.createObjectURL(blob);
+          const ext = image.extension || 'jpeg';
+          const base64 = btoa(new Uint8Array(image.buffer).reduce((s, b) => s + String.fromCharCode(b), ''));
+          const dataUrl = `data:image/${ext};base64,${base64}`;
           const row = img.range && img.range.tl ? img.range.tl.row : 0;
           const col = img.range && img.range.tl ? img.range.tl.col : 0;
           imageDataList.push({ dataUrl, row, col });

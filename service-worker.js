@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v43-revert-camera';
+const CACHE_NAME = 'rw-karte-v44-no-blob-url';
 const ASSETS = [
   './',
   './index.html',
