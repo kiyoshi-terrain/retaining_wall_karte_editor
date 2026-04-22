@@ -4781,7 +4781,12 @@
 
         if (image && image.buffer) {
           const ext = image.extension || 'jpeg';
-          const base64 = btoa(new Uint8Array(image.buffer).reduce((s, b) => s + String.fromCharCode(b), ''));
+          const bytes = new Uint8Array(image.buffer);
+          let binary = '';
+          for (let i = 0; i < bytes.length; i += 8192) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, bytes.length)));
+          }
+          const base64 = btoa(binary);
           const dataUrl = `data:image/${ext};base64,${base64}`;
 
           // アンカー位置を取得
@@ -5280,7 +5285,12 @@
         const image = workbook.getImage(img.imageId);
         if (image && image.buffer) {
           const ext = image.extension || 'jpeg';
-          const base64 = btoa(new Uint8Array(image.buffer).reduce((s, b) => s + String.fromCharCode(b), ''));
+          const bytes = new Uint8Array(image.buffer);
+          let binary = '';
+          for (let i = 0; i < bytes.length; i += 8192) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, bytes.length)));
+          }
+          const base64 = btoa(binary);
           const dataUrl = `data:image/${ext};base64,${base64}`;
           const row = img.range && img.range.tl ? img.range.tl.row : 0;
           const col = img.range && img.range.tl ? img.range.tl.col : 0;

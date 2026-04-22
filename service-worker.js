@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v44-no-blob-url';
+const CACHE_NAME = 'rw-karte-v45-chunked-base64';
 const ASSETS = [
   './',
   './index.html',
