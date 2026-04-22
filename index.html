@@ -8124,14 +8124,25 @@
         btnOverlay.style.background = 'rgba(255,255,255,0.35)';
         btnSplit.style.background = 'rgba(255,255,255,0.15)';
       } else {
-        // 並列: 左右分割 — LIVE(左) / PREVIOUS(右)
-        stage.style.flexDirection = 'row';
-        videoWrap.style.aspectRatio = '';
-        videoWrap.style.flex = '1';
-        videoWrap.style.width = '';
-        videoWrap.style.maxHeight = '';
-        videoWrap.style.margin = '0';
-        video.style.objectFit = 'cover';
+        // 並列: 縦持ち→上下分割+クロップ / 横持ち→左右分割
+        const portrait = window.innerHeight >= window.innerWidth;
+        if (portrait) {
+          stage.style.flexDirection = 'column';
+          videoWrap.style.aspectRatio = String(4 / 3);
+          videoWrap.style.flex = 'none';
+          videoWrap.style.width = '100%';
+          videoWrap.style.maxHeight = '50%';
+          videoWrap.style.margin = '0';
+          video.style.objectFit = 'cover';
+        } else {
+          stage.style.flexDirection = 'row';
+          videoWrap.style.aspectRatio = '';
+          videoWrap.style.flex = '1';
+          videoWrap.style.width = '';
+          videoWrap.style.maxHeight = '';
+          videoWrap.style.margin = '0';
+          video.style.objectFit = 'cover';
+        }
         video.style.background = '#000';
         ghostSplit.style.objectFit = 'contain';
         ghostOverlay.style.display = 'none';
