@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v38-auto-crop-orient';
+const CACHE_NAME = 'rw-karte-v39-comment-font';
 const ASSETS = [
   './',
   './index.html',
