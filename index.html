@@ -8431,16 +8431,18 @@
     // 写真選択ハンドラ
     async function handlePhotoSelect(e) {
       const file = e.target.files[0];
-      if (!file) return;
+      if (!file) { console.error('[photo] no file'); return; }
 
       showLoading('Processing photo...');
+      setStatus(`[1] file=${file.name} size=${file.size} idx=${currentPhotoIndex}`, '');
 
       try {
-        // ファイル名を解決（カメラ撮影時はIMG_YYYYMMDD_HHMMSS.jpg）
         const displayFilename = resolvePhotoFilename(file);
+        setStatus(`[2] normalizing ${displayFilename}...`, '');
 
-        // Canvas経由で正規化（EXIF回転を適用、解像度リサイズ）
         const result = await normalizeImage(file, photoResolution);
+        setStatus(`[3] normalized ${result.width}x${result.height} dataUrl=${result.dataUrl?.length || 0}chars`, '');
+
         const label = photoData[currentPhotoIndex].label;
 
         photoData[currentPhotoIndex].imageBase64 = result.dataUrl;
