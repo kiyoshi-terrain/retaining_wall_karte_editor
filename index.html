@@ -4488,6 +4488,9 @@
     fileInput.addEventListener('change', handleFileSelect);
     photoInput.addEventListener('change', handlePhotoSelect);
     cameraInput.addEventListener('change', handlePhotoSelect);
+    // iOS: click 時に value をクリアしないと同じファイルで change が発火しない
+    photoInput.addEventListener('click', function() { this.value = ''; });
+    cameraInput.addEventListener('click', function() { this.value = ''; });
 
     // ファイル選択ハンドラ（従来のinput用）
     async function handleFileSelect(e) {

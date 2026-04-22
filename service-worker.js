@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v40-input-reset';
+const CACHE_NAME = 'rw-karte-v41-click-reset';
 const ASSETS = [
   './',
   './index.html',
