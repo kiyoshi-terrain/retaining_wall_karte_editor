@@ -4488,9 +4488,6 @@
     fileInput.addEventListener('change', handleFileSelect);
     photoInput.addEventListener('change', handlePhotoSelect);
     cameraInput.addEventListener('change', handlePhotoSelect);
-    // iOS: click 時に value をクリアしないと同じファイルで change が発火しない
-    photoInput.addEventListener('click', function() { this.value = ''; });
-    cameraInput.addEventListener('click', function() { this.value = ''; });
 
     // ファイル選択ハンドラ（従来のinput用）
     async function handleFileSelect(e) {
@@ -7711,7 +7708,6 @@
     function openCamera() {
       closeActionSheet();
       if (isNative && CapCamera) {
-        // Capacitorネイティブカメラ（カメラロール自動保存）
         showLoading('Opening camera...');
         captureCameraPhoto().then(dataUrl => {
           hideLoading();
@@ -7727,7 +7723,18 @@
           }
         });
       } else {
-        cameraInput.click();
+        // 毎回新しい input を生成 — iOS で 2 枚目以降の change が確実に発火する
+        const freshInput = document.createElement('input');
+        freshInput.type = 'file';
+        freshInput.accept = 'image/*';
+        freshInput.setAttribute('capture', 'environment');
+        freshInput.style.display = 'none';
+        freshInput.addEventListener('change', (e) => {
+          handlePhotoSelect(e);
+          freshInput.remove();
+        });
+        document.body.appendChild(freshInput);
+        freshInput.click();
       }
     }
 
@@ -8239,7 +8246,16 @@
           }
         });
       } else {
-        photoInput.click();
+        const freshInput = document.createElement('input');
+        freshInput.type = 'file';
+        freshInput.accept = 'image/*';
+        freshInput.style.display = 'none';
+        freshInput.addEventListener('change', (e) => {
+          handlePhotoSelect(e);
+          freshInput.remove();
+        });
+        document.body.appendChild(freshInput);
+        freshInput.click();
       }
     }
 
