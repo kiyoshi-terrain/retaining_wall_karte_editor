@@ -7723,18 +7723,7 @@
           }
         });
       } else {
-        // 毎回新しい input を生成 — iOS で 2 枚目以降の change が確実に発火する
-        const freshInput = document.createElement('input');
-        freshInput.type = 'file';
-        freshInput.accept = 'image/*';
-        freshInput.setAttribute('capture', 'environment');
-        freshInput.style.display = 'none';
-        freshInput.addEventListener('change', (e) => {
-          handlePhotoSelect(e);
-          freshInput.remove();
-        });
-        document.body.appendChild(freshInput);
-        freshInput.click();
+        cameraInput.click();
       }
     }
 
@@ -8246,16 +8235,7 @@
           }
         });
       } else {
-        const freshInput = document.createElement('input');
-        freshInput.type = 'file';
-        freshInput.accept = 'image/*';
-        freshInput.style.display = 'none';
-        freshInput.addEventListener('change', (e) => {
-          handlePhotoSelect(e);
-          freshInput.remove();
-        });
-        document.body.appendChild(freshInput);
-        freshInput.click();
+        photoInput.click();
       }
     }
 
@@ -8464,9 +8444,6 @@
         renderPhotoGrid();
         updateStats();
         setStatus('Photo added', label);
-
-        // input value をリセット — iOS で 2 枚目以降の change イベントが発火するために必須
-        if (e.target && e.target.value !== undefined) e.target.value = '';
         hideLoading();
 
         // ★ GPS / EXIF / IDB / Drive はすべて非同期バックグラウンド (UI をブロックしない)

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v42-fresh-input';
+const CACHE_NAME = 'rw-karte-v43-revert-camera';
 const ASSETS = [
   './',
   './index.html',
