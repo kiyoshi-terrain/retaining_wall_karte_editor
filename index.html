@@ -8445,6 +8445,9 @@
         renderPhotoGrid();
         updateStats();
         setStatus('Photo added', label);
+
+        // input value をリセット — iOS で 2 枚目以降の change イベントが発火するために必須
+        if (e.target && e.target.value !== undefined) e.target.value = '';
         hideLoading();
 
         // ★ GPS / EXIF / IDB / Drive はすべて非同期バックグラウンド (UI をブロックしない)

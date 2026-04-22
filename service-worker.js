@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rw-karte-v39-comment-font';
+const CACHE_NAME = 'rw-karte-v40-input-reset';
 const ASSETS = [
   './',
   './index.html',
